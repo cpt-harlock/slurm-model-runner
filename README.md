@@ -1,0 +1,182 @@
+# model-runner
+
+LLM inference serving on **Leonardo (CINECA)**: multi-node vLLM under Slurm, exposed
+through a login-node gateway that Claude Code and Avante.nvim can talk to.
+
+See **[docs/architecture.md](docs/architecture.md)** for the design, the measured
+cluster facts it rests on, and the phased plan.
+
+## Layout
+
+```
+config/models/*.toml   per-model config (Slurm resources + engine flags)
+slurm/                 sbatch template: Singularity + Ray + vLLM + registry heartbeat
+scripts/               login-node staging: container build, weight download
+src/mr/
+  config.py            paths and model specs
+  registry.py          file-based service discovery on Lustre
+  slurm.py             typed wrapper over the Slurm CLI
+  cli.py               mrctl
+  supervisor.py        reconcile loop (walltime handoff, idle reaping)
+  demand.py            per-model lazy-wake flag (should this model be up right now?)
+  gateway.py           renders LiteLLM config from the registry; runs the waker stub
+tests/
+  test_supervisor.py   decide()/apply() unit tests -- no cluster needed
+  test_demand.py       demand.py unit tests
+  test_gateway.py      render() + a real-HTTP test of the waker stub
+```
+
+## Setup
+
+```bash
+export MR_ROOT=$HOME/model-runner
+export MR_STATE=$SCRATCH/model-runner       # registry, logs, caches
+export MR_WEIGHTS=$FAST/weights             # flash tier -- there is no node-local disk
+export PYTHONPATH=$MR_ROOT/src:$PYTHONPATH
+alias mrctl='python3 -m mr.cli'
+```
+
+## Phase 0 — get one model serving
+
+```bash
+./scripts/build-container.sh              # login node; needs internet
+mrctl stage qwen3-32b                     # login node; stripes then downloads
+mrctl up qwen3-32b
+mrctl status
+curl http://<node>:<port>/v1/models       # login->compute is direct, no tunnel
+```
+
+The `READY after Ns` line in `$MR_STATE/logs/qwen3-32b.<jobid>.out` is the Lustre
+load time. **Record it** — it sets `handoff_lead_s` for every model, and it is the
+main unknown the rest of the design is parameterised on.
+
+Measured (job 54085509): **244s** cold off Lustre for Qwen3-32B/TP4, striped `-c 16 -S
+4M`. `config/models/qwen3-32b.toml` sets `handoff_lead_s = 3000` from this.
+
+## Phase 2 — LiteLLM gateway
+
+```bash
+PIP_CACHE_DIR=$MR_STATE/cache/pip pip install --user "litellm[proxy]"   # one-time, login node
+mrctl gateway                              # owns litellm; renders config from the registry,
+                                            # restarts it whenever the backend set changes
+```
+
+Verified end-to-end against a live backend: OpenAI-format `/v1/chat/completions`
+(Avante), Anthropic-format `/v1/messages` (Claude Code), tool calling (`get_weather`
+round-trip returned a correct `tool_use` block), and SSE streaming on `/v1/messages`.
+
+Then verified with the **actual `claude` CLI**, not just raw `curl`:
+
+```bash
+cd /some/test/dir   # anywhere claude can read a file from, for a real tool-use check
+ANTHROPIC_BASE_URL=http://127.0.0.1:4000 ANTHROPIC_API_KEY=sk-local-litellm-test \
+  claude --bare -p --model sonnet --allowedTools=Read "Read secret.txt and tell me what it says."
+```
+
+This surfaced three real bugs the raw-`curl` tests didn't catch (all fixed, all in
+`docs/architecture.md` §9 risks 10–12): Claude Code resolves `--model sonnet` to
+`claude-sonnet-5` client-side, so the original `model_alias_map` (keyed on the bare
+word) never matched — fixed with wildcard `model_list` entries; Claude Code's default
+`max_tokens=64000` exceeds any of our models' context — fixed with
+`model_info.max_output_tokens` + `litellm_settings.modify_params: true`; and Qwen3's
+`<think>` block leaked into the visible response — fixed with `--reasoning-parser qwen3`.
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:4000   # Claude Code, after an SSH tunnel to the login node
+export OPENAI_BASE_URL=http://127.0.0.1:4000/v1   # Avante
+```
+
+No `LITELLM_MASTER_KEY` is set yet — fine while this is single-user and the proxy only
+listens on `127.0.0.1`, revisit for §9 risk 5 (multi-user).
+
+## Phase 3 — supervisor (rolling handoff + idle reaping)
+
+```bash
+PYTHONPATH=src python3 -m unittest tests.test_supervisor -v   # decide() is pure; no cluster needed
+mrctl supervise                                                # the real reconcile loop
+```
+
+`decide()` (pure, unit-tested) reads the registry and Slurm state and returns what to do;
+`refresh_activity()` (the one I/O step, scrapes each backend's own vLLM `/metrics`) and
+`apply()` carry it out. Three real bugs were caught by actually running this against a live
+backend rather than trusting the unit tests alone (all in `docs/architecture.md` §9,
+risks 13-15):
+
+- Idle detection originally used the heartbeat, which never goes stale enough to fire since
+  it refreshes every 30s regardless of real traffic.
+- The very first cold start (empty registry, nothing running yet) launched three duplicate
+  jobs a tick apart, because a job has no registry record until its own script starts
+  running, which can be minutes after `sbatch` returns on a busy queue.
+- A long-lived `mrctl gateway` process silently dropped a perfectly healthy backend for
+  ~34 minutes after a mid-session schema change to the registry's `Backend` record — its
+  in-memory class was older than what a compute job's (always-fresh-code) heartbeat had
+  started writing, so every read raised a silently-swallowed `TypeError`. Fixed structurally:
+  `registry.read_all()` now filters unknown JSON keys before constructing, so an old reader
+  survives a newer writer instead of losing the record. This is a real, recurring hazard for
+  this architecture (long-lived login-node processes vs. always-fresh compute jobs) any time
+  `Backend`'s shape changes — not a one-off.
+
+**Live-verified end to end, not just unit-tested**: a genuinely idle backend was correctly
+reaped after exactly one `idle_timeout_s` window and the supervisor launched a fresh
+replacement with no manual intervention; and — caught by accident when a manual `mrctl up`
+raced the supervisor's own cold-start launch — two backends briefly went READY together,
+`start_drain` correctly picked the older one, and it was cancelled within one tick once
+`refresh_activity()` saw its in-flight count reach zero, ending in exactly one healthy
+backend. **Not yet live-verified**: the walltime-*triggered* path specifically (a job
+launching a successor because its own wall is running out, rather than any other reason two
+backends end up READY) — that needs a job to actually approach its multi-day wall, which
+isn't practical to wait out; that trigger condition rests on the unit tests instead.
+
+Operational note (§9 risk 16): once the supervisor is running, manual `mrctl up` for
+cold-start recovery is redundant and can race it — reach for `mrctl up --force` only to
+deliberately add a replica or replace a specific job.
+
+### Lazy-wake (§9 risk 17)
+
+Idle-reaping only saves anything if the backend it cancels actually *stays down* until
+someone wants it again. Caught live: 22 reap/relaunch cycles overnight, none of them
+saving a thing, because `desired` was hardcoded to 1 forever. Fixed with `mr.demand` (a
+tiny persisted per-model flag — `reap_idle` clears it, the supervisor reads it fresh every
+tick) plus a "waker" stub `mr.gateway` runs (`_WakerHandler`, `127.0.0.1:4100`): a cold
+model still gets a real `model_list` row in LiteLLM, pointed at the waker instead of a
+vLLM URL, so a request for it bumps demand back to 1 and gets an immediate, clear answer
+instead of an opaque routing error. The supervisor's next tick (≤ 60s) sees the demand and
+cold-starts it.
+
+Getting the waker's response right took two real bugs, both invisible except over real
+HTTP: not draining the request body risked stalling an HTTP/1.1 client mid-connection, and
+— the actual cause of a ~90+ second hang with zero log output — answering with **503**
+makes LiteLLM auto-retry it as a transient `ServiceUnavailableError` before ever replying
+to the client. **400** (correctly: this isn't infra flakiness, it's "come back later")
+returns in under 100ms. `tests/test_gateway.py` locks this in with a real HTTP round-trip,
+not just a direct handler call — that's the only way this class of bug shows up at all.
+
+```bash
+curl http://127.0.0.1:4000/v1/chat/completions -d '{"model":"qwen3-32b", ...}'  # cold
+# -> immediate 400, "model 'qwen3-32b' is cold; a start has been triggered ..."
+# retry in ~1-4 min once the supervisor's next tick launches it
+```
+
+## Constraints worth remembering
+
+- **A100 is SM 8.0 — no FP8.** Never `--kv-cache-dtype fp8`. Native-FP8 checkpoints
+  (DeepSeek-V3, Kimi K2) must be dequantized to BF16 or re-quantized to AWQ/GPTQ-INT4.
+- **Booster's driver is R535 (535.274.02) — CUDA 12.x generation only, no forward
+  compat to CUDA 13.** The default `vllm/vllm-openai` Docker tags moved to a CUDA 13.0
+  base (torch `+cu130`); that fails at engine init with `driver on your system is too
+  old (found version 12020)`. Always build from a `-cu12x` tag (currently
+  `v0.27.1-cu129`, set as the default in `scripts/build-container.sh`) — verified with
+  a real `torch.cuda.init()` + matmul on `boost_qos_dbg` before trusting it in a job.
+- **No node-local disk.** `/tmp` is a 10 GB tmpfs. Weights come off Lustre every start.
+- **`$HOME` is a 50 GB quota** and writes fail *silently* when it is full. Every cache
+  (`HF_HOME`, `TRITON_CACHE_DIR`, `VLLM_CACHE_ROOT`, Singularity's) is redirected to
+  `$MR_STATE`. Keep it that way.
+- **Login → compute works on any port** (verified, 0.1 ms). No SSH tunnels internally.
+- **Login-node processes get `RLIMIT_CPU=600s` soft** (hard is unlimited). Anything
+  long-running or CPU-heavy there must raise it or it dies at 10 CPU-minutes with a
+  confusing error — this already killed `mksquashfs` during a container build. Raised in
+  `scripts/build-container.sh`, `mr.supervisor.run`, `mr.gateway.run`. Add it to anything
+  new you put on a login node.
+- **`cin_staff` is a shared allocation.** A 2-node backend burns ~192 node-hours per 4-day
+  job. Idle reaping is on by default — an idle model sitting on 8 A100s is antisocial even
+  when the budget allows it.

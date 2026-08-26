@@ -1,0 +1,51 @@
+# Phase 0/1 target: single node, fits comfortably, fast to load.
+# Doubles as ANTHROPIC_SMALL_FAST_MODEL for Claude Code's background tasks.
+name = "qwen3-32b"
+hf_repo = "Qwen/Qwen3-32B"
+
+idle_timeout_s = 1800    # reap after 30 min idle to protect the allocation
+handoff_lead_s = 3000    # 244s measured load (job 54085509) x1.5 (=366s) + ~45min
+                         # queue margin. Load time is real; queue_margin is still a
+                         # guess -- boost_usr_prod/cin_staff queue wait is unmeasured.
+                         # Tighten once Phase 3's supervisor logs actual pending time.
+
+[slurm]
+account = "cin_staff"         # shared staff allocation; architecture.md §9
+partition = "boost_usr_prod"
+qos = "boost_qos_lprod"       # 4 days, <=8 nodes / 32 GPUs
+nodes = 1
+time = "4-00:00:00"
+cpus_per_task = 32
+gpus_per_node = 4
+
+[engine]
+tensor_parallel_size = 4      # TP within the node, over NVLink
+pipeline_parallel_size = 1
+max_model_len = 32768
+gpu_memory_utilization = 0.90
+# Claude Code is unusable without tool calling -- validate this in Phase 2.
+# No --kv-cache-dtype fp8: A100 is SM 8.0, FP8 needs 8.9+.
+#
+# --kv-cache-memory-bytes pins the KV cache pool explicitly (job 54152253,
+# node lrdn2765, FAILED). At gpu_memory_utilization=0.90 alone, vLLM's own
+# auto-sizing left only a 150 MiB safety buffer against CUDA-graph capture
+# overhead, and capture ate exactly that: "CUDA out of memory. Tried to
+# allocate 150.00 MiB. ... 96.50 MiB is free." The same config had run fine
+# minutes earlier on node lrdn3224 (job 54085509) -- this is a real per-node
+# free-memory margin, not a one-off fluke, so it will recur on some fraction
+# of nodes. vLLM's own diagnostic computed the safe value below (its log
+# message names the flag `--kv-cache-memory`, but the actual CLI arg in this
+# vllm version is `--kv-cache-memory-bytes` -- checked against
+# vllm/engine/arg_utils.py in the container, the message is just wrong).
+#
+# --reasoning-parser qwen3: without it, Qwen3's <think>...</think> block comes
+# back as plain text inside the message content instead of a separate
+# reasoning field -- confirmed against the real Claude Code CLI, which then
+# just prints the raw <think> tags inline rather than rendering a collapsible
+# thinking section. `vllm.reasoning.__init__` registers this exact model
+# under the name "qwen3" (Qwen3ParserReasoningAdapter).
+extra_args = [
+  "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
+  "--reasoning-parser", "qwen3",
+  "--kv-cache-memory-bytes", "38745599181",
+]
