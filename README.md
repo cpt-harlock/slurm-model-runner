@@ -157,6 +157,41 @@ curl http://127.0.0.1:4000/v1/chat/completions -d '{"model":"qwen3-32b", ...}'  
 # retry in ~1-4 min once the supervisor's next tick launches it
 ```
 
+## Phase 4 — multi-node
+
+```bash
+./scripts/build-container.sh v0.27.1-cu129   # rebuild: `ray` isn't in the upstream image at all
+mrctl up qwen3-32b-4n                        # validation config: Qwen3-32B deliberately spread
+                                              # TP4/PP4 across 4 real nodes, no new download needed
+```
+
+`ray` is not on `PATH` or importable in the upstream `vllm/vllm-openai` image — confirmed
+empirically. Adding it needed a real container customization step, and `--fakeroot` is
+unavailable on this system (no subuid/subgid mapping for this user), which rules out a `.def`
+file's `%post`. `scripts/build-container.sh` now builds an unprivileged writable **sandbox**
+(same as the plain `docker://` pull always did), `pip install`s `ray[default]` directly into
+it, then repacks to an immutable `.sif`. Two things bit this specifically, both fixed in the
+script: a writable sandbox can't auto-create missing bind targets (`mkdir -p` Leonardo's
+top-level mountpoints into the sandbox first), and `-C`/`--containall` — only ever there to
+dodge that mount error — swaps in a tiny tmpfs home/tmp and made `pip`'s download overflow it
+with `No space left on device` despite `$SCRATCH` having petabytes free.
+
+**Live-verified, not just started**: job 54343864, Qwen3-32B (TP4×PP4, 16 GPUs, 4 real nodes)
+reached `READY after 167s` with correct per-node rank/PP/TP assignment in the log, a real
+completion succeeded through the actual TP4/PP4 endpoint, and 10/10 concurrent requests
+succeeded (200 OK, ~0.6s each) — Phase 4's "4+ nodes stable under load" exit criterion, met.
+Getting there needed two more fixes: `--distributed-executor-backend ray` (vLLM assumes
+single-node otherwise, even under a live multi-node Ray cluster — it names this exact flag in
+its own error), and `--min-nodes` on `ray symmetric-run` (undocumented as required, but there's
+no stated guarantee otherwise that the entrypoint waits for every node before running). Full
+narrative, including the first attempt's failure, in `docs/architecture.md` §9 risk 18.
+
+**Not yet done**: the actual flagship model. Qwen3-Coder-480B-A35B (~960 GB BF16) doesn't fit
+in `$FAST`'s 1 TB quota next to the existing Qwen3-32B weights (939 GB free) — needs more
+storage or the AWQ-INT4 conversion `docs/architecture.md` §5 already flags as separate work.
+NCCL/IB tuning beyond the HCAs already pinned in `vllm-server.sbatch` is untouched; nothing
+so far has needed more.
+
 ## Constraints worth remembering
 
 - **A100 is SM 8.0 — no FP8.** Never `--kv-cache-dtype fp8`. Native-FP8 checkpoints

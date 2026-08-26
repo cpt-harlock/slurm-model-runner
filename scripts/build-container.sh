@@ -54,7 +54,13 @@ singularity build --sandbox "$SANDBOX" "docker://vllm/vllm-openai:${TAG}"
 mkdir -p "$SANDBOX"/{leonardo,leonardo_scratch,leonardo_work,leonardo_prod}
 
 echo "installing ray[default] into the sandbox"
-singularity exec -C --writable "$SANDBOX" pip install --no-cache-dir "ray[default]"
+# No -C/--containall: it swaps in a small tmpfs-backed ephemeral home/tmp
+# instead of the real (Lustre-backed) ones, and pip's in-progress download
+# temp file overflowed it -- "No space left on device" despite $SCRATCH
+# having petabytes free. It was only ever there to dodge the missing bind
+# targets, which are now pre-created above, so a plain --writable exec
+# (using the real host home/tmp) works and has real room to work with.
+singularity exec --writable "$SANDBOX" pip install --no-cache-dir "ray[default]"
 
 echo "repacking sandbox -> ${DEST}"
 singularity build --force "$DEST" "$SANDBOX"

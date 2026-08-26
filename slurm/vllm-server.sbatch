@@ -126,15 +126,25 @@ else
   # Phase 4. `ray symmetric-run` launches the identical entrypoint on every node
   # and handles head/worker election itself -- no manual `ray start --head` dance.
   #
+  # --distributed-executor-backend ray: without it vLLM assumes the whole
+  # world size must fit on one node's GPUs and refuses to start --
+  # "World size (16) is larger than the number of available GPUs (4) in this
+  # node" -- even though a real multi-node Ray cluster was already up. vLLM
+  # names this exact fix in its own error message.
+  #
   # A real per-node script file, not an inline srun command: VLLM_HOST_IP has
   # to be resolved fresh on whichever node actually runs it (each rank
   # advertises its own IP), which an inline `srun ... $SING ray ...` can't do
   # cleanly without nested-quoting hell across srun/bash/singularity/ray/vllm.
+  # --min-nodes is not optional in practice: per `ray symmetric-run --help`,
+  # without it there's no guarantee the entrypoint waits for every node to
+  # join before running, and vLLM's distributed init needs the full world
+  # size present from the start.
   WORKER_SCRIPT="${STATE_DIR}/specs/${MODEL}.${JOB_ID}.worker.sh"
   cat > "$WORKER_SCRIPT" <<WORKEREOF
 #!/bin/bash
 export VLLM_HOST_IP="\$(hostname -i | awk '{print \$1}')"
-exec $SING ray symmetric-run --address "${HEAD_NODE}:6379" -- vllm serve $VLLM_ARGS
+exec $SING ray symmetric-run --address "${HEAD_NODE}:6379" --min-nodes ${SLURM_JOB_NUM_NODES} -- vllm serve $VLLM_ARGS --distributed-executor-backend ray
 WORKEREOF
   chmod +x "$WORKER_SCRIPT"
   srun --ntasks-per-node=1 "$WORKER_SCRIPT" &

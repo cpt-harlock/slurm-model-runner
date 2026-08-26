@@ -228,7 +228,7 @@ Claude Code setup silently fails.
 | **1** | `mr.registry` + sbatch template + `mrctl up/status/down` | One model up and discoverable, manual restart |
 | **2** | LiteLLM gateway + client wiring | Claude Code completes a real **tool-using** task against the cluster — **done: the actual `claude` CLI (`--bare -p`, `ANTHROPIC_BASE_URL` pointed at the gateway) used its own `Read` tool to fetch a file's real contents end-to-end through vLLM (§9 risks 8, 10–12)** |
 | **3** | `mr.supervisor`: rolling handoff + idle reaping | Service survives a walltime expiry with no failed request — **in progress: drain state machine + activity-based idle reaping implemented and unit-tested (`tests/test_supervisor.py`); live-verified a full idle-reap-and-relaunch cycle (§9 risk 13); caught/fixed a real duplicate-launch bug on cold start (§9 risk 14); caught/fixed a schema-forward-compat bug that made a live gateway silently drop a healthy backend (§9 risk 15); live-verified the full drain cycle itself when two backends briefly went READY together -- `start_drain` fired, then the incumbent was cancelled within one tick once `refresh_activity()` saw its in-flight count reach zero, ending in exactly one healthy backend. The only piece still unverified live is *why* a second backend goes READY in the first place via the walltime path specifically (`launch_successor` firing because a job's wall is running out, rather than a manual `mrctl up`) -- that needs a job to actually approach its multi-day wall, which isn't practical to wait out; that trigger condition is covered by the unit tests instead** |
-| **4** | Multi-node via `ray symmetric-run`; flagship model; NCCL/IB tuning | 4+ nodes stable under load |
+| **4** | Multi-node via `ray symmetric-run`; flagship model; NCCL/IB tuning | 4+ nodes stable under load — **mechanism done: job 54343864, Qwen3-32B deliberately spread TP4/PP4 across 4 real nodes (16 GPUs), `READY after 167s`, 10/10 concurrent requests succeeded (§9 risk 18). Flagship model itself (Qwen3-Coder-480B) not yet attempted — needs more `$FAST` storage or the AWQ-INT4 conversion; NCCL/IB tuning beyond the existing pinned HCAs is untouched, nothing so far has needed it** |
 | **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — |
 
 ---
@@ -425,3 +425,63 @@ Claude Code setup silently fails.
     `tests/test_gateway.py::WakerTest::test_returns_400_not_503` locks this in; it exists
     specifically because the bug was only observable over a real HTTP round-trip, not by
     calling the handler method directly.
+18. **Phase 4 kickoff: `ray` was never actually in the container.** `vllm-server.sbatch`'s
+    multi-node branch has called `ray symmetric-run` since Phase 0, untested, because nothing
+    before Phase 4 ever ran on more than one node. Checked directly: `ray` is not on `PATH` and
+    not importable in the upstream `vllm/vllm-openai` image at all -- confirmed empirically, not
+    documented anywhere obvious. Three more things had to be fixed to get a real multi-node run
+    even queued:
+    - **No `--fakeroot` on this system** ("no valid mapping entry found for amonteru" -- no
+      subuid/subgid range configured for this user, a site setting). A `.def` file's `%post`
+      needs `--fakeroot`/`--remote`/`proot` to run `pip install`, so that path is closed.
+      Fixed with the unprivileged alternative: build a writable *sandbox* the same way the bare
+      `docker://` pull always worked, `pip install` directly into it, repack to an immutable
+      `.sif`. `scripts/build-container.sh` does this now.
+    - **A writable sandbox can't auto-create missing bind targets.** A normal (SIF + overlay)
+      container run silently creates a missing bind destination; a writable sandbox exec can't,
+      and failed with "can't create /leonardo destination automatically without overlay or
+      underlay". Fixed by pre-creating Leonardo's top-level mountpoints for real inside the
+      sandbox directory before the writable exec.
+    - **`-C`/`--containall`, used to dodge the mount error above, was the wrong fix and caused a
+      new one**: it swaps in a small tmpfs-backed ephemeral home/tmp instead of the real
+      (Lustre-backed) ones, and pip's in-progress download temp file overflowed it --
+      `No space left on device`, while `$SCRATCH` itself had petabytes free. Once the mount
+      targets were pre-created, `-C` wasn't needed at all; removing it fixed this for good.
+
+    Also fixed while reading `ray symmetric-run --help` for the first time (real output, not
+    assumed): `--min-nodes` is not optional in practice. Without it there's no stated guarantee
+    the entrypoint waits for every node to actually join the Ray cluster before running --
+    vLLM's distributed init needs the full world size present from the start, so
+    `vllm-server.sbatch` now passes `--min-nodes ${SLURM_JOB_NUM_NODES}` explicitly.
+
+    Separately (code review, not yet observed as a live failure): the multi-node branch set
+    `VLLM_HOST_IP` once in the main script (which runs on the head node) and relied on `srun`
+    to propagate it to every worker -- meaning every worker would have advertised the *head's*
+    IP as its own. Fixed by resolving it fresh inside a real per-node worker script
+    (`${STATE_DIR}/specs/<model>.<jobid>.worker.sh`, written once per job, `srun`'d identically
+    on every node) rather than an inline `srun ... $SING ray ...` command, which also sidesteps
+    nested-quoting hell across srun/bash/singularity/ray/vllm.
+
+    To validate the mechanism itself without a large new download: `config/models/
+    qwen3-32b-4n.toml` deliberately over-provisions the already-staged Qwen3-32B (TP=4, PP=4,
+    4 nodes) purely to exercise `ray symmetric-run` + cross-node NCCL/IB + PP end to end. The
+    real flagship (Qwen3-Coder-480B-A35B, ~960 GB BF16 per §5) does not currently fit in
+    `$FAST`'s 1 TB quota alongside the existing Qwen3-32B weights (939 GB free) -- serving it
+    for real needs either more storage or the AWQ-INT4 conversion §5 already flags as a
+    separate task, neither of which blocks proving the multi-node mechanism itself.
+
+    First real attempt (job 54342777) got all the way to a fully-formed 4-node Ray cluster
+    (head + 3 workers all connected, confirmed in the log) and vLLM starting up, then failed
+    at its own config validation: `World size (16) is larger than the number of available GPUs
+    (4) in this node. If this is intentional and you are using: ray, set
+    '--distributed-executor-backend ray'.` -- vLLM assumes single-node unless told otherwise,
+    even with a live multi-node Ray cluster already up underneath it. Also notable: the failed
+    run did not exit or free its allocation -- `ray symmetric-run` keeps the cluster alive after
+    the entrypoint command crashes ("Running subprocesses are monitored..." per its own log),
+    so a crash-looping entrypoint would otherwise burn the full walltime doing nothing. Added
+    `--distributed-executor-backend ray` to the multi-node `vllm serve` invocation and
+    resubmitted (job 54343864): **`READY after 167s`**, correct rank/PP/TP assignment across
+    all 4 nodes in the log (`rank 8 in world size 16 ... PP rank 2, TP rank 0`, etc.), a real
+    completion succeeded through the actual TP4/PP4 endpoint
+    (`system_fingerprint: vllm-0.27.1-tp4-pp4-...`), and 10/10 concurrent requests succeeded
+    (200 OK, ~0.6s each). Phase 4's core mechanism is proven.
