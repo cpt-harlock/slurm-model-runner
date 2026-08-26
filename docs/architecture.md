@@ -229,7 +229,7 @@ Claude Code setup silently fails.
 | **2** | LiteLLM gateway + client wiring | Claude Code completes a real **tool-using** task against the cluster — **done: the actual `claude` CLI (`--bare -p`, `ANTHROPIC_BASE_URL` pointed at the gateway) used its own `Read` tool to fetch a file's real contents end-to-end through vLLM (§9 risks 8, 10–12)** |
 | **3** | `mr.supervisor`: rolling handoff + idle reaping | Service survives a walltime expiry with no failed request — **in progress: drain state machine + activity-based idle reaping implemented and unit-tested (`tests/test_supervisor.py`); live-verified a full idle-reap-and-relaunch cycle (§9 risk 13); caught/fixed a real duplicate-launch bug on cold start (§9 risk 14); caught/fixed a schema-forward-compat bug that made a live gateway silently drop a healthy backend (§9 risk 15); live-verified the full drain cycle itself when two backends briefly went READY together -- `start_drain` fired, then the incumbent was cancelled within one tick once `refresh_activity()` saw its in-flight count reach zero, ending in exactly one healthy backend. The only piece still unverified live is *why* a second backend goes READY in the first place via the walltime path specifically (`launch_successor` firing because a job's wall is running out, rather than a manual `mrctl up`) -- that needs a job to actually approach its multi-day wall, which isn't practical to wait out; that trigger condition is covered by the unit tests instead** |
 | **4** | Multi-node via `ray symmetric-run`; flagship model; NCCL/IB tuning | 4+ nodes stable under load — **mechanism done: job 54343864, Qwen3-32B deliberately spread TP4/PP4 across 4 real nodes (16 GPUs), `READY after 167s`, 10/10 concurrent requests succeeded (§9 risk 18). Flagship model itself (Qwen3-Coder-480B) not yet attempted — needs more `$FAST` storage or the AWQ-INT4 conversion; NCCL/IB tuning beyond the existing pinned HCAs is untouched, nothing so far has needed it** |
-| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — **multi-model routing: done for real, live-verified end to end.** `qwen3-coder-480b-awq` (community AWQ-INT4, ~262 GB) staged, brought up (TP4×PP2, 8 GPUs, `READY after 348s` on the tool-call-fixed run), and now serves Claude Code's real `sonnet` alias through the full stack: real CLI -> gateway -> flagship -> real `Read` tool use -> correct answer. Along the way: fixed a routing bug before it shipped (explicit per-model `role`, §9 risk 20), fixed tool calling that silently returned raw unparsed text instead of structured calls (`qwen3_coder` parser, not `hermes` -- §9 risk 21), and hit the exact stale-long-lived-gateway hazard risk 15 warned about, just failing silently instead of loudly this time (§9 risk 22). Both models run concurrently; Avante.nvim wired up as a second real client (`~/.config/nvim/lua/plugins/avante.lua`). Queue-aware UX, metrics, and K2 INT4 conversion not started |
+| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — **multi-model routing: done for real, live-verified end to end.** `qwen3-coder-480b-awq` (community AWQ-INT4, ~262 GB) staged, brought up (TP4×PP2, 8 GPUs, `READY after 348s` on the tool-call-fixed run), and now serves Claude Code's real `sonnet` alias through the full stack: real CLI -> gateway -> flagship -> real `Read` tool use -> correct answer. Along the way: fixed a routing bug before it shipped (explicit per-model `role`, §9 risk 20), fixed tool calling that silently returned raw unparsed text instead of structured calls (`qwen3_coder` parser, not `hermes` -- §9 risk 21), and hit the exact stale-long-lived-gateway hazard risk 15 warned about, just failing silently instead of loudly this time (§9 risk 22). Both models run concurrently; Avante.nvim wired up as a second real client (`~/.config/nvim/lua/plugins/avante.lua`). **Queue-aware UX: done** (§9 risk 23) -- the waker's ETA is now real Slurm/registry state, not a fixed guess. **K2-class: in progress** -- `moonshotai/Kimi-K2-Thinking` (594 GB, natively INT4, no conversion pipeline needed after all -- see §9 risk 24) staged and its first bring-up underway. Metrics not started |
 
 ---
 
@@ -553,3 +553,46 @@ Claude Code setup silently fails.
     `mr.cli supervise`) after any code change that affects their behavior is a manual step an
     operator has to remember. Worth a real fix later (e.g. a content-hash check that triggers
     a self-restart), but not yet built.
+23. **Queue-aware UX, implemented.** The waker's response was a fixed guess regardless of real
+    state: "retry in ~1-4 min" whether nothing had even been submitted yet or a job was
+    already most of the way through loading. `mr.gateway._wake_eta_message()` now checks
+    what's actually true -- a `measured_load_s` field (new, `config.ModelSpec`, populated by
+    hand after each real bring-up, same as `handoff_lead_s` already was) replaces the
+    hardcoded "~1-4 min"; if a job is already `PENDING`, `slurm.start_estimate()` gives a real
+    queue-wait number when Slurm has one to give (and says so honestly when it doesn't, rather
+    than inventing one); if a job is already `LOADING`, the remaining time is estimated from
+    how long it's actually been running against the measured load time. Live-verified through
+    two real states during an actual cold start: "nothing yet" (used qwen3-32b's real 244s,
+    not a guess) and "queued, no Slurm estimate yet" (Slurm hadn't computed a backfill estimate
+    for the freshly-submitted job) -- both correct, including the honest-uncertainty case
+    rather than a fabricated number. The `LOADING`-remaining-time branch is covered by
+    `tests/test_gateway.py::WakeEtaTest` but wasn't caught live in this window (the job loaded
+    faster than the poll interval checked); the logic is a straightforward extension of the
+    same pattern, not a new mechanism.
+24. **The K2-class INT4 conversion this phase originally scoped as a separate ML-engineering
+    project turned out not to be needed.** §5's original analysis was against Kimi K2's
+    *native FP8* checkpoint (~2 TB after BF16 dequant, exceeds the 8-node cap) and assumed
+    we'd have to run our own AWQ/GPTQ quantization pipeline to get an INT4 version at all.
+    Checking the Hugging Face API directly (not assuming from memory -- this knowledge was
+    stale) found three current Kimi releases, and none needed that: `moonshotai/Kimi-K3`
+    (1.56 TB, ruled out -- far too big for `$FAST`, a brand-new experimental
+    linear-attention architecture (`KimiLinearForCausalLM`, custom "situ" activation), and
+    quantized in **MXFP4** (floating-point 4-bit), which likely hits the same
+    no-native-tensor-core problem on Ampere that FP8 does -- this needs Hopper/Ada, SM 8.9+);
+    `moonshotai/Kimi-K2.7-Code` (595 GB, ruled out -- same INT4 quantization as the one
+    chosen, but wrapped in `KimiK25ForConditionalGeneration`, a newer multimodal/vision-capable
+    class adding complexity for a text-only use case with no offsetting benefit); and
+    `moonshotai/Kimi-K2-Thinking` (594 GB, **chosen**) -- natively INT4 (`compressed-tensors`,
+    `num_bits: 4`, `type: int` -- Marlin-compatible, same style as `qwen3-coder-480b-awq`),
+    text-only, and built on `DeepseekV3ForCausalLM`, an architecture vLLM has supported for a
+    long time. Storage after staging: 859 GB / 1 TB used, ~141 GB free -- tight, no slack for
+    another model this size without freeing something first.
+
+    Checked vLLM's tool-parser and reasoning-parser registries *before* bringing this up, not
+    after finding out the hard way like `qwen3-coder-480b-awq`'s first attempt did (risk 21):
+    this model's `chat_template.jinja` uses Kimi-specific special tokens
+    (`<|tool_calls_section_begin|>`, `<|tool_call_begin|>...<|tool_call_argument_begin|>...
+    <|tool_call_end|>`) and `<think>...</think>` reasoning, neither hermes nor qwen3_coder.
+    vLLM registers a dedicated `kimi_k2` parser for both roles -- confirmed actually importable
+    in the container (`vllm.tool_parsers.kimi_k2_tool_parser`,
+    `vllm.reasoning.kimi_k2_reasoning_parser`) before spending the time to stage 594 GB.

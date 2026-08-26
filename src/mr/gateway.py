@@ -21,7 +21,7 @@ import subprocess
 import threading
 import time
 
-from . import config, demand, registry
+from . import config, demand, registry, slurm
 
 log = logging.getLogger("mr.gateway")
 
@@ -169,6 +169,44 @@ def sync_once() -> bool:
     return True
 
 
+def _wake_eta_message(model: str) -> str:
+    """Best-effort human-readable ETA for the waker's response.
+
+    Queue-aware, not a fixed guess (architecture.md/README Phase 5): real
+    numbers when there's something real to look at (an already-queued or
+    -loading job's own Slurm/registry state), honest uncertainty otherwise
+    (nothing exists yet -- the supervisor hasn't even run its next tick).
+    Never raises: this is best-effort UX text, not something that should be
+    able to break the waker's response.
+    """
+    try:
+        m = config.load(model)
+        now = time.time()
+        live = {j.job_id: j for j in slurm.jobs() if j.name == f"mr-{model}"}
+        backends = [b for b in registry.for_model(model, include_stale=True) if b.job_id in live]
+        load_s = m.measured_load_s or 300
+
+        loading = next((b for b in backends if b.state in (registry.QUEUED, registry.LOADING)), None)
+        if loading and loading.started_at and m.measured_load_s:
+            remaining = max(0, m.measured_load_s - (now - loading.started_at))
+            return f"already loading, ~{int(remaining)}s left (measured {m.measured_load_s}s last time)"
+        if loading:
+            return "already loading, should be ready soon"
+
+        pending = next((j for j in live.values() if j.state == "PENDING"), None)
+        if pending:
+            eta = slurm.start_estimate(pending.job_id)
+            if eta:
+                wait = max(0, eta - now)
+                return f"queued (Slurm estimates start in ~{int(wait / 60)}m), then ~{int(load_s)}s to load"
+            return f"queued for resources (no Slurm estimate yet); ~{int(load_s)}s to load once it starts"
+
+        return f"a start will be requested within 60s; ~{int(load_s)}s to load once Slurm grants resources"
+    except Exception:
+        log.exception("wake ETA estimation failed for %s", model)
+        return "a start has been triggered; retry in a few minutes"
+
+
 class _WakerHandler(http.server.BaseHTTPRequestHandler):
     """Answers requests LiteLLM routes to a cold model's waker URL.
 
@@ -192,12 +230,10 @@ class _WakerHandler(http.server.BaseHTTPRequestHandler):
             demand.wake(model)
         except Exception:
             log.exception("wake failed for %s", model)
+        eta = _wake_eta_message(model)
         body = json.dumps({
             "error": {
-                "message": (
-                    f"model '{model}' is cold; a start has been triggered "
-                    "(picked up within 60s), retry in ~1-4 min once it's up"
-                ),
+                "message": f"model '{model}' is cold; {eta}",
                 "type": "model_warming_up",
                 "code": "400",
             }

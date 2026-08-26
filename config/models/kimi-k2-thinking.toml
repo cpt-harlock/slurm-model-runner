@@ -1,0 +1,70 @@
+# Second flagship (architecture.md §5's original "K2-class" stretch goal),
+# now much cheaper than that section assumed: the original analysis was
+# against Kimi K2's *native FP8* checkpoint (~2TB BF16 after dequant,
+# exceeds the 8-node cap) and assumed a from-scratch AWQ/GPTQ conversion
+# project. This is a different, newer release -- moonshotai/Kimi-K2-Thinking,
+# ~594 GB, already INT4-quantized natively (compressed-tensors, num_bits=4,
+# type=int -- Marlin-compatible, same style as qwen3-coder-480b-awq) and
+# using DeepseekV3ForCausalLM, an architecture vLLM has supported for a long
+# time. No conversion pipeline needed, unlike what was originally scoped.
+#
+# Two other current Kimi releases were checked and ruled out (verified via
+# each repo's config.json before choosing, not assumed from the name):
+#   - Kimi-K3 (1.56 TB): far too big for $FAST, uses a brand-new experimental
+#     linear-attention architecture (KimiLinearForCausalLM, custom "situ"
+#     activation), and is quantized in MXFP4 (floating-point 4-bit) --
+#     likely hits the same lack-of-native-tensor-core problem on Ampere as
+#     FP8 does (see EngineSpec's fp8 warning); Hopper/Ada (SM 8.9+) territory.
+#   - Kimi-K2.7-Code (595 GB): same size/INT4 quantization as this one, but
+#     wrapped in KimiK25ForConditionalGeneration, a newer multimodal
+#     (vision-capable) class -- added complexity/risk for a text-only
+#     coding-assistant use case with no offsetting benefit.
+#
+# Storage: 305 GB already used (qwen3-32b + qwen3-coder-480b-awq) + this
+# 594 GB leaves ~125 GB free on $FAST's 1 TB quota -- tight, no slack left
+# for another model of this size without freeing something first.
+name = "kimi-k2-thinking"
+hf_repo = "moonshotai/Kimi-K2-Thinking"
+
+idle_timeout_s = 1800
+# No measured load time yet -- placeholder until a real bring-up measures it
+# (see README's Phase 0 section for the pattern; qwen3-coder-480b-awq.toml
+# for how this gets tightened afterward).
+handoff_lead_s = 3600
+
+[slurm]
+account = "cin_staff"
+partition = "boost_usr_prod"
+qos = "boost_qos_lprod"       # 4 days, <=8 nodes / 32 GPUs; this uses 4
+nodes = 4
+time = "4-00:00:00"
+cpus_per_task = 32
+gpus_per_node = 4
+
+[engine]
+tensor_parallel_size = 4      # TP within each node, over NVLink
+pipeline_parallel_size = 4    # PP across the 4 nodes, over IB
+# Native max_position_embeddings is 262144 per config.json. Starting
+# conservative, same reasoning as qwen3-coder-480b-awq.toml: raise once a
+# real bring-up confirms the KV budget rather than guessing at the ceiling.
+max_model_len = 32768
+gpu_memory_utilization = 0.85 # conservative starting point, same as the other
+                               # multi-node flagship; no measured
+                               # --kv-cache-memory-bytes exists yet for this
+                               # checkpoint/topology (architecture.md §9 risk 9)
+#
+# --tool-call-parser kimi_k2 / --reasoning-parser kimi_k2: checked directly
+# against this model's own chat_template.jinja before ever bringing it up --
+# it uses Kimi-specific special tokens (<|tool_calls_section_begin|>,
+# <|tool_call_begin|>...<|tool_call_argument_begin|>...<|tool_call_end|>) and
+# <think>...</think> reasoning, neither of which match hermes or qwen3_coder.
+# vLLM registers a dedicated "kimi_k2" parser for both (confirmed importable
+# in this container: vllm.tool_parsers.kimi_k2_tool_parser,
+# vllm.reasoning.kimi_k2_reasoning_parser) -- checked the registry and
+# actually imported both before staging 594 GB, not after finding out the
+# hard way like qwen3-coder-480b-awq's first bring-up did (architecture.md
+# §9 risk 21).
+extra_args = [
+  "--enable-auto-tool-choice", "--tool-call-parser", "kimi_k2",
+  "--reasoning-parser", "kimi_k2",
+]

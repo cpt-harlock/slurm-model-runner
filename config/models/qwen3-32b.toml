@@ -5,6 +5,7 @@ hf_repo = "Qwen/Qwen3-32B"
 role = "small"           # answers Claude Code's "haiku" alias; see mr.gateway
 
 idle_timeout_s = 1800    # reap after 30 min idle to protect the allocation
+measured_load_s = 244    # job 54085509; feeds mr.gateway's queue-aware wake ETA
 handoff_lead_s = 3000    # 244s measured load (job 54085509) x1.5 (=366s) + ~45min
                          # queue margin. Load time is real; queue_margin is still a
                          # guess -- boost_usr_prod/cin_staff queue wait is unmeasured.

@@ -10,9 +10,13 @@ hf_repo = "TechxGenus/Qwen3-Coder-480B-A35B-Instruct-AWQ"
 role = "primary"         # answers Claude Code's sonnet/opus alias; see mr.gateway
 
 idle_timeout_s = 1800
+measured_load_s = 348    # job 54381732 (the tool-parser-fixed run); feeds
+                         # mr.gateway's queue-aware wake ETA
 # 407s measured load (job 54379904, first real bring-up) x1.5 (=610s) +
 # ~45min queue margin, same formula as qwen3-32b.toml. queue_margin is still
-# a guess for this topology (2 nodes vs. qwen3-32b's 1).
+# a guess for this topology (2 nodes vs. qwen3-32b's 1). Kept at the first
+# run's 407s, not the later 348s -- more conservative and still valid either
+# way.
 handoff_lead_s = 3300
 
 [slurm]

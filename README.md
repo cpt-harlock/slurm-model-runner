@@ -256,8 +256,37 @@ End-to-end proof, not just each piece in isolation: the real `claude` CLI, using
 `sonnet` alias, used its own `Read` tool against the flagship model and got the correct
 answer — the same test pattern as Phase 2, now against the actual production model.
 
-**Not started**: queue-aware UX (a real Slurm-start-estimate ETA in the waker's response,
-instead of the current rough "~1-4 min" guess), metrics, and the K2-class INT4 conversion.
+### Queue-aware UX (done)
+
+`mr.gateway._wake_eta_message()` replaced the fixed "~1-4 min" guess with real state: a new
+`measured_load_s` field per model (`config.ModelSpec`, populated by hand after each real
+bring-up, same pattern as `handoff_lead_s`), `slurm.start_estimate()` for a real queue-wait
+number when a job is already `PENDING` and Slurm has one to give (says so honestly when it
+doesn't, rather than inventing a number), and remaining-time-from-elapsed when a job is
+already `LOADING`. Live-verified through an actual cold start: "nothing yet" correctly used
+qwen3-32b's real 244s, and "queued, no Slurm estimate yet" correctly said so rather than
+guessing. `docs/architecture.md` §9 risk 23.
+
+### K2-class: Kimi-K2-Thinking (staged, bring-up in progress)
+
+The INT4 conversion this phase originally scoped as a separate ML-engineering project turned
+out not to be needed — that assumption was against Kimi K2's *native FP8* checkpoint
+(~2 TB after dequant). Checked the Hugging Face API directly instead of assuming from
+(stale) memory: `moonshotai/Kimi-K2-Thinking` (594 GB) is already natively INT4-quantized
+(compressed-tensors, Marlin-compatible, same style as the Qwen3-Coder flagship) and built on
+`DeepseekV3ForCausalLM`, an architecture vLLM has supported for a long time. Two newer
+releases were checked and ruled out: `Kimi-K3` (1.56 TB, brand-new experimental
+linear-attention architecture, quantized in MXFP4 — likely hits the same
+no-native-tensor-core wall on Ampere that FP8 does) and `Kimi-K2.7-Code` (595 GB, same INT4
+quantization but wrapped in a newer multimodal-capable class — unneeded complexity for a
+text-only use case). `$FAST` after staging: 859 GB / 1 TB used, ~141 GB free.
+
+Checked vLLM's tool/reasoning-parser registries *before* bringing this up, not after finding
+out the hard way like the Qwen3-Coder flagship's first attempt did (§9 risk 21): this model's
+chat template uses Kimi-specific tool-call tokens and `<think>` reasoning, and vLLM has a
+dedicated `kimi_k2` parser for both — confirmed actually importable in the container before
+staging 594 GB, not assumed from the model name. Full narrative: `docs/architecture.md` §9
+risk 24.
 
 ## Constraints worth remembering
 

@@ -12,10 +12,19 @@ from __future__ import annotations
 import http.client
 import http.server
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
-from mr import gateway, registry
+from mr import gateway, registry, slurm
+
+MODEL = "qwen3-32b"
+JOB_NAME = f"mr-{MODEL}"
+
+
+def make_job(job_id: str, state: str) -> slurm.Job:
+    return slurm.Job(job_id=job_id, name=JOB_NAME, state=state, nodelist="",
+                      start_time=0.0, end_time=0.0)
 
 
 class RenderTest(unittest.TestCase):
@@ -98,6 +107,49 @@ class WakerTest(unittest.TestCase):
             resp = conn.getresponse()
             resp.read()
             self.assertEqual(resp.status, 400)
+
+
+class WakeEtaTest(unittest.TestCase):
+    """mr.gateway._wake_eta_message: queue-aware UX, not a fixed guess."""
+
+    def setUp(self) -> None:
+        self.spec = type("Spec", (), {"measured_load_s": 300})()
+        patcher = patch.object(gateway.config, "load", return_value=self.spec)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+    def eta(self, jobs, backends=()):
+        with patch.object(gateway.slurm, "jobs", return_value=jobs), \
+             patch.object(gateway.registry, "for_model", return_value=backends):
+            return gateway._wake_eta_message(MODEL)
+
+    def test_nothing_yet_says_so_honestly(self):
+        msg = self.eta(jobs=[])
+        self.assertIn("will be requested within 60s", msg)
+        self.assertIn("300s", msg)  # measured_load_s, not a hardcoded number
+
+    def test_pending_with_slurm_estimate_uses_real_eta(self):
+        with patch.object(gateway.slurm, "start_estimate", return_value=time.time() + 120):
+            msg = self.eta(jobs=[make_job("1", "PENDING")])
+        self.assertIn("Slurm estimates start", msg)
+
+    def test_pending_without_slurm_estimate_says_so_honestly(self):
+        with patch.object(gateway.slurm, "start_estimate", return_value=0):
+            msg = self.eta(jobs=[make_job("1", "PENDING")])
+        self.assertIn("no Slurm estimate yet", msg)
+
+    def test_already_loading_uses_measured_remaining_time(self):
+        b = registry.Backend(model=MODEL, served_name=MODEL, job_id="1",
+                              state=registry.LOADING, started_at=time.time() - 100)
+        msg = self.eta(jobs=[make_job("1", "RUNNING")], backends=[b])
+        self.assertIn("already loading", msg)
+        self.assertIn("s left", msg)
+
+    def test_never_raises_even_if_everything_fails(self):
+        with patch.object(gateway.config, "load", side_effect=RuntimeError("boom")):
+            msg = gateway._wake_eta_message(MODEL)
+        self.assertIsInstance(msg, str)
+        self.assertTrue(msg)
 
 
 if __name__ == "__main__":

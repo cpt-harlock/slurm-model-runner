@@ -73,6 +73,12 @@ class ModelSpec:
     # doesn't happen to sort first would have silently routed sonnet/opus to
     # the small model instead -- caught before it ever shipped, not live.
     role: str = ""
+    # Real "READY after Ns" from the most recent bring-up, recorded by hand
+    # (README's Phase 0 pattern) after each measurement. 0 means "never
+    # measured yet". Used for the waker's queue-aware ETA (mr.gateway) --
+    # separate from handoff_lead_s, which is a derived scheduling margin, not
+    # this raw number.
+    measured_load_s: int = 0
 
     def __post_init__(self) -> None:
         self.served_name = self.served_name or self.name
@@ -98,6 +104,7 @@ def load(name: str) -> ModelSpec:
         idle_timeout_s=raw.get("idle_timeout_s", 1800),
         handoff_lead_s=raw.get("handoff_lead_s", 3600),
         role=raw.get("role", ""),
+        measured_load_s=raw.get("measured_load_s", 0),
         slurm=SlurmSpec(**raw.get("slurm", {})),
         engine=EngineSpec(**raw.get("engine", {})),
     )
