@@ -17,7 +17,15 @@ ulimit -t unlimited
 # NVIDIA's own image label (NVIDIA_REQUIRE_CUDA) certifies for driver
 # >=535,<536 via minor-version compatibility -- i.e. it runs natively on
 # what we actually have. Always pick a -cu12x tag here, never the bare one.
-TAG="${1:-v0.27.1-cu129}"
+#
+# v0.28.0-cu129 (bumped from v0.27.1-cu129): tried specifically to see if it
+# fixed Kimi-K2-Thinking's broken tool-call/reasoning-parser output
+# (architecture.md §9 risk 25) -- it didn't (identical garbled tool-call
+# tokens, identical content:null on plain completions), but real-GPU sanity
+# (debug QoS, torch.cuda matmul) and full regression tests (real completion +
+# real tool-call request) against both qwen3-32b and qwen3-coder-480b-awq
+# passed cleanly, so it's kept as the new baseline anyway (risk 26).
+TAG="${1:-v0.28.0-cu129}"
 STATE_DIR="${MR_STATE:-${SCRATCH}/model-runner}"
 DEST="${MR_SIF:-${STATE_DIR}/containers/vllm.sif}"
 

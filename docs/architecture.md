@@ -645,3 +645,40 @@ Claude Code setup silently fails.
     `config/models/kimi-k2-thinking.toml` is left in place (with `--enforce-eager` and full
     reasoning for the CUDA-graph fix documented above) so re-enabling it later is a `mrctl up`
     away, not a re-investigation.
+26. **Upgraded vLLM to the latest release compatible with our CUDA driver, specifically to test
+    whether it fixed risk 25 -- it did not, but the upgrade was kept anyway.** Docker Hub's
+    `vllm/vllm-openai` tags showed `v0.28.0-cu129` as the newest release still built for CUDA
+    12.9 (same driver-compatibility family as our existing `v0.27.1-cu129`; the bare/`latest`
+    tags remain CUDA 13.0-only and still need driver >=580, which Leonardo's R535 doesn't have
+    -- unchanged from the reasoning in risk-tag-choice history). Checked v0.28.0's release notes
+    first: no Kimi-K2 tool-parser or reasoning-parser changes listed (the release's Kimi-related
+    work was Kimi-K3 decode-kernel optimization and Kimi-K2.5 vision-encoder CUDA graphs,
+    neither relevant here).
+
+    Rebuilt the container (backed up the working `v0.27.1-cu129` image first, as
+    `vllm-v0.27.1-cu129.sif.bak`, before overwriting the shared `vllm.sif` all three model
+    configs point at). Verified real GPU compatibility on `boost_qos_dbg` (not just import
+    checks -- a real `torch.cuda.init()` and 4096x4096 matmul on an actual A100-SXM-64GB,
+    `torch 2.13.0+cu129`, compute capability `(8, 0)` as expected) before trusting it for a
+    real bring-up.
+
+    Re-ran risk 25's exact two tests against Kimi-K2-Thinking on the new container
+    (`READY after 586s`, clean bring-up, `--enforce-eager` still needed and still works): both
+    failures reproduced byte-for-byte identically -- same `content: null` with the answer stuck
+    in `reasoning` on a plain completion, same scrambled
+    `<|tool_call_begin|><|tool_call_end|>functions.get_weather:0<|im_middle|>{"location": "Rome,
+    Italy"}<|tool_call_argument_begin|>` token order on a real tool-call request. Confirms risk
+    25's upstream-bug diagnosis rather than a version-specific one -- the latest release doesn't
+    fix it either.
+
+    Given the container swap is global (both other models load the same `vllm.sif`), regression-
+    tested both before trusting v0.28.0 as the new default rather than assuming "newer is safe":
+    `qwen3-32b` (`READY after 212s`, real completion correct once given enough tokens to close
+    its own `<think>` block, real `get_weather` tool call parsed correctly) and
+    `qwen3-coder-480b-awq` (`READY after 407s`, same two tests, both correct). No regression
+    found on either -- kept v0.28.0 as the new baseline (`scripts/build-container.sh`'s default
+    tag updated) since it's the newer supported release and both production models are
+    unaffected, even though it bought nothing for Kimi. The `v0.27.1-cu129` backup is kept on
+    disk (~10 GB, trivial against `$SCRATCH`'s multi-petabyte headroom) as an immediate rollback
+    path if a regression surfaces later under real production load that this smoke test didn't
+    catch.

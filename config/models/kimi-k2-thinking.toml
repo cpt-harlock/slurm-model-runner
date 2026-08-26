@@ -81,3 +81,13 @@ extra_args = [
   "--reasoning-parser", "kimi_k2",
   "--enforce-eager",
 ]
+
+# Also tried bumping the container to vLLM v0.28.0 (the latest release
+# compatible with our CUDA 12.x driver) specifically to see if it fixed the
+# broken tool-call/reasoning parsing below -- it didn't. Identical garbled
+# tool-call token order, identical content:null on plain completions, on the
+# latest stable release. Confirms this is a genuinely open upstream bug for
+# this model (architecture.md §9 risk 25/26), not something an engine
+# version bump was going to fix. The container was kept at v0.28.0 anyway
+# (validated clean against qwen3-32b and qwen3-coder-480b-awq) -- this
+# model just stays deprioritized until Moonshot/vLLM actually fix it.

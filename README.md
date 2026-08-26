@@ -304,6 +304,17 @@ two working models (`qwen3-32b`, `qwen3-coder-480b-awq`) remain the serving set;
 `config/models/kimi-k2-thinking.toml` is left ready to go for whenever an upstream fix
 lands. Full narrative: `docs/architecture.md` §9 risk 25.
 
+Also tried upgrading the container to `v0.28.0-cu129` (the latest vLLM release still built
+for our CUDA 12.x driver generation) specifically to see if a newer engine fixed this — it
+didn't. Identical garbled tool-call token order, identical `content: null` on plain
+completions, confirming this is a genuinely open upstream bug rather than something already
+fixed in a later release. Kept the upgrade anyway: real GPU sanity check passed
+(`torch.cuda` init + matmul on debug QoS) and both production models regression-tested clean
+on the new container (`qwen3-32b`, `qwen3-coder-480b-awq` — real completions and real
+tool-calls, both correct). The previous working container is kept on disk as
+`vllm-v0.27.1-cu129.sif.bak` for an instant rollback if needed. Full narrative:
+`docs/architecture.md` §9 risk 26.
+
 ## Constraints worth remembering
 
 - **A100 is SM 8.0 — no FP8.** Never `--kv-cache-dtype fp8`. Native-FP8 checkpoints
