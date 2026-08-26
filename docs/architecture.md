@@ -229,7 +229,7 @@ Claude Code setup silently fails.
 | **2** | LiteLLM gateway + client wiring | Claude Code completes a real **tool-using** task against the cluster — **done: the actual `claude` CLI (`--bare -p`, `ANTHROPIC_BASE_URL` pointed at the gateway) used its own `Read` tool to fetch a file's real contents end-to-end through vLLM (§9 risks 8, 10–12)** |
 | **3** | `mr.supervisor`: rolling handoff + idle reaping | Service survives a walltime expiry with no failed request — **in progress: drain state machine + activity-based idle reaping implemented and unit-tested (`tests/test_supervisor.py`); live-verified a full idle-reap-and-relaunch cycle (§9 risk 13); caught/fixed a real duplicate-launch bug on cold start (§9 risk 14); caught/fixed a schema-forward-compat bug that made a live gateway silently drop a healthy backend (§9 risk 15); live-verified the full drain cycle itself when two backends briefly went READY together -- `start_drain` fired, then the incumbent was cancelled within one tick once `refresh_activity()` saw its in-flight count reach zero, ending in exactly one healthy backend. The only piece still unverified live is *why* a second backend goes READY in the first place via the walltime path specifically (`launch_successor` firing because a job's wall is running out, rather than a manual `mrctl up`) -- that needs a job to actually approach its multi-day wall, which isn't practical to wait out; that trigger condition is covered by the unit tests instead** |
 | **4** | Multi-node via `ray symmetric-run`; flagship model; NCCL/IB tuning | 4+ nodes stable under load — **mechanism done: job 54343864, Qwen3-32B deliberately spread TP4/PP4 across 4 real nodes (16 GPUs), `READY after 167s`, 10/10 concurrent requests succeeded (§9 risk 18). Flagship model itself (Qwen3-Coder-480B) not yet attempted — needs more `$FAST` storage or the AWQ-INT4 conversion; NCCL/IB tuning beyond the existing pinned HCAs is untouched, nothing so far has needed it** |
-| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — **multi-model routing: done for real, live-verified end to end.** `qwen3-coder-480b-awq` (community AWQ-INT4, ~262 GB) staged, brought up (TP4×PP2, 8 GPUs, `READY after 348s` on the tool-call-fixed run), and now serves Claude Code's real `sonnet` alias through the full stack: real CLI -> gateway -> flagship -> real `Read` tool use -> correct answer. Along the way: fixed a routing bug before it shipped (explicit per-model `role`, §9 risk 20), fixed tool calling that silently returned raw unparsed text instead of structured calls (`qwen3_coder` parser, not `hermes` -- §9 risk 21), and hit the exact stale-long-lived-gateway hazard risk 15 warned about, just failing silently instead of loudly this time (§9 risk 22). Both models run concurrently; Avante.nvim wired up as a second real client (`~/.config/nvim/lua/plugins/avante.lua`). **Queue-aware UX: done** (§9 risk 23) -- the waker's ETA is now real Slurm/registry state, not a fixed guess. **K2-class: in progress** -- `moonshotai/Kimi-K2-Thinking` (594 GB, natively INT4, no conversion pipeline needed after all -- see §9 risk 24) staged and its first bring-up underway. Metrics not started |
+| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — **multi-model routing: done for real, live-verified end to end.** `qwen3-coder-480b-awq` (community AWQ-INT4, ~262 GB) staged, brought up (TP4×PP2, 8 GPUs, `READY after 348s` on the tool-call-fixed run), and now serves Claude Code's real `sonnet` alias through the full stack: real CLI -> gateway -> flagship -> real `Read` tool use -> correct answer. Along the way: fixed a routing bug before it shipped (explicit per-model `role`, §9 risk 20), fixed tool calling that silently returned raw unparsed text instead of structured calls (`qwen3_coder` parser, not `hermes` -- §9 risk 21), and hit the exact stale-long-lived-gateway hazard risk 15 warned about, just failing silently instead of loudly this time (§9 risk 22). Both models run concurrently; Avante.nvim wired up as a second real client (`~/.config/nvim/lua/plugins/avante.lua`). **Queue-aware UX: done** (§9 risk 23) -- the waker's ETA is now real Slurm/registry state, not a fixed guess. **K2-class: attempted, deprioritized** -- `moonshotai/Kimi-K2-Thinking` (594 GB, natively INT4, no conversion pipeline needed after all -- see §9 risk 24) staged and brought up successfully (`READY after 528s` once `--enforce-eager` worked around a real CUDA-graph/Triton crash), but real tool-call and reasoning validation found both broken by an open, unresolved upstream vLLM/Kimi bug (§9 risk 25) -- job cancelled, deprioritized until upstream fixes land. Metrics not started |
 
 ---
 
@@ -596,3 +596,52 @@ Claude Code setup silently fails.
     vLLM registers a dedicated `kimi_k2` parser for both roles -- confirmed actually importable
     in the container (`vllm.tool_parsers.kimi_k2_tool_parser`,
     `vllm.reasoning.kimi_k2_reasoning_parser`) before spending the time to stage 594 GB.
+25. **Kimi-K2-Thinking's first bring-up crashed on CUDA graph capture; the second bring-up
+    started fine but is unusable anyway -- a real, open upstream bug, not a config problem.**
+    Job 54397697 (TP4xPP4, no `--enforce-eager`) died with `Triton Error [CUDA]: operation not
+    permitted when stream is capturing` inside the MLA decode-attention Triton kernel
+    (`vllm/v1/attention/backends/mla/triton_mla.py`) during CUDA graph capture on
+    `Worker_PP2_TP1`, cascading to `EngineCore failed to start`: a first-time Triton
+    kernel JIT/load hit mid-capture, which CUDA graphs don't tolerate. `ray symmetric-run`
+    kept the 4-node Ray cluster alive after the crash (same behavior as risk 18), wasting the
+    allocation until manually cancelled -- confirmed still `RUNNING` in `squeue` well after
+    the engine had died. Added `--enforce-eager` (disables CUDA graph capture entirely) and
+    resubmitted as job 54439491: `READY after 528s`, no crash this time.
+
+    But real validation (a plain chat completion and a real `get_weather` tool-call request,
+    the same rigor applied to every other model this session) found the engine is not
+    actually usable for this project's purpose:
+    - **Reasoning/content splitting is broken.** Asked a trivial factual question at both
+      default sampling and Moonshot's own recommended `temperature=1.0`; the model correctly
+      reasoned to and produced the right final sentence, but the entire output -- including
+      the final answer -- landed in the `reasoning` field with `content: null`. The
+      `kimi_k2` reasoning parser only flips from reasoning to content on seeing a literal
+      `</think>` token; this model, at least for short/simple answers, never emitted one
+      before hitting a real EOS (`finish_reason: "stop"`, not a truncation), so the parser
+      never flips and the client gets nothing usable in `content`.
+    - **Tool-calling is broken.** A real `get_weather` tool-call request made the model
+      correctly decide to call the tool, but the raw special-token sequence came back
+      out of order: `<|tool_call_begin|><|tool_call_end|>functions.get_weather:0<|im_middle|>
+      {"location": "Rome, Italy"}<|tool_call_argument_begin|>` -- begin/end/argument markers
+      scrambled relative to the documented format. Result: `tool_calls: null`,
+      `content: null`; nothing reaches the client either way.
+
+    Ruled out a stale-checkpoint explanation before escalating: our staged
+    `tokenizer_config.json`/`chat_template.jinja` are byte-identical in size to the current
+    `moonshotai/Kimi-K2-Thinking` files on the Hub, so this isn't a case of an out-of-date
+    local copy missing an upstream fix. This matches a known, currently *open and unresolved*
+    upstream issue specific to this model
+    ([MoonshotAI/Kimi-K2#100](https://github.com/MoonshotAI/Kimi-K2/issues/100) -- same
+    garbled/out-of-order tool-call-token symptom, no fix posted); the
+    [vLLM project's own Kimi K2 tool-calling deep-dive](https://vllm.ai/blog/2025-10-28-kimi-k2-accuracy)
+    documents that earlier Kimi-K2 releases needed real fixes on both the vLLM parser side and
+    Moonshot's tokenizer-config side before tool calls parsed reliably -- nothing in that history
+    yet covers the Thinking variant's token layout.
+
+    **Decision (with the user): deprioritize Kimi-K2-Thinking for now** rather than sink further
+    time into an upstream bug with no known fix -- job cancelled, allocation freed. The two
+    working models (`qwen3-32b`, `qwen3-coder-480b-awq`) remain the full serving set. Revisit
+    once vLLM and/or Moonshot ship a fix for this model's tool-call/reasoning token handling;
+    `config/models/kimi-k2-thinking.toml` is left in place (with `--enforce-eager` and full
+    reasoning for the CUDA-graph fix documented above) so re-enabling it later is a `mrctl up`
+    away, not a re-investigation.

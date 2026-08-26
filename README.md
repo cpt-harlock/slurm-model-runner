@@ -267,7 +267,7 @@ already `LOADING`. Live-verified through an actual cold start: "nothing yet" cor
 qwen3-32b's real 244s, and "queued, no Slurm estimate yet" correctly said so rather than
 guessing. `docs/architecture.md` §9 risk 23.
 
-### K2-class: Kimi-K2-Thinking (staged, bring-up in progress)
+### K2-class: Kimi-K2-Thinking (staged and brought up, but deprioritized — broken upstream)
 
 The INT4 conversion this phase originally scoped as a separate ML-engineering project turned
 out not to be needed — that assumption was against Kimi K2's *native FP8* checkpoint
@@ -287,6 +287,22 @@ chat template uses Kimi-specific tool-call tokens and `<think>` reasoning, and v
 dedicated `kimi_k2` parser for both — confirmed actually importable in the container before
 staging 594 GB, not assumed from the model name. Full narrative: `docs/architecture.md` §9
 risk 24.
+
+The first bring-up crashed during CUDA graph capture (`Triton Error [CUDA]: operation not
+permitted when stream is capturing`, inside the MLA decode kernel) — fixed with
+`--enforce-eager`, and the second bring-up reached `READY after 528s` cleanly. But real
+validation (a plain completion and a real tool-call request) found the engine unusable for
+this project: reasoning/content splitting is broken (the model's answer landed entirely in
+`reasoning` with `content: null` — the `kimi_k2` reasoning parser needs a literal `</think>`
+that this model doesn't reliably emit) and tool-calling is broken (a real `get_weather` call
+came back with scrambled special-token order and `tool_calls: null`). This matches a known,
+currently open, unresolved upstream bug specific to this model
+([MoonshotAI/Kimi-K2#100](https://github.com/MoonshotAI/Kimi-K2/issues/100)), not a config
+or stale-checkpoint problem (staged `tokenizer_config.json`/`chat_template.jinja` verified
+byte-identical to the current Hub copy). **Decision: deprioritized** — job cancelled, the
+two working models (`qwen3-32b`, `qwen3-coder-480b-awq`) remain the serving set;
+`config/models/kimi-k2-thinking.toml` is left ready to go for whenever an upstream fix
+lands. Full narrative: `docs/architecture.md` §9 risk 25.
 
 ## Constraints worth remembering
 
