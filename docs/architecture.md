@@ -229,7 +229,7 @@ Claude Code setup silently fails.
 | **2** | LiteLLM gateway + client wiring | Claude Code completes a real **tool-using** task against the cluster — **done: the actual `claude` CLI (`--bare -p`, `ANTHROPIC_BASE_URL` pointed at the gateway) used its own `Read` tool to fetch a file's real contents end-to-end through vLLM (§9 risks 8, 10–12)** |
 | **3** | `mr.supervisor`: rolling handoff + idle reaping | Service survives a walltime expiry with no failed request — **in progress: drain state machine + activity-based idle reaping implemented and unit-tested (`tests/test_supervisor.py`); live-verified a full idle-reap-and-relaunch cycle (§9 risk 13); caught/fixed a real duplicate-launch bug on cold start (§9 risk 14); caught/fixed a schema-forward-compat bug that made a live gateway silently drop a healthy backend (§9 risk 15); live-verified the full drain cycle itself when two backends briefly went READY together -- `start_drain` fired, then the incumbent was cancelled within one tick once `refresh_activity()` saw its in-flight count reach zero, ending in exactly one healthy backend. The only piece still unverified live is *why* a second backend goes READY in the first place via the walltime path specifically (`launch_successor` firing because a job's wall is running out, rather than a manual `mrctl up`) -- that needs a job to actually approach its multi-day wall, which isn't practical to wait out; that trigger condition is covered by the unit tests instead** |
 | **4** | Multi-node via `ray symmetric-run`; flagship model; NCCL/IB tuning | 4+ nodes stable under load — **mechanism done: job 54343864, Qwen3-32B deliberately spread TP4/PP4 across 4 real nodes (16 GPUs), `READY after 167s`, 10/10 concurrent requests succeeded (§9 risk 18). Flagship model itself (Qwen3-Coder-480B) not yet attempted — needs more `$FAST` storage or the AWQ-INT4 conversion; NCCL/IB tuning beyond the existing pinned HCAs is untouched, nothing so far has needed it** |
-| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — |
+| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — **multi-model routing: in progress.** Fixed a real bug this exposed before it shipped (`mr.gateway` picked sonnet/opus's target by alphabetical order + a "32b" name match, which only worked with one model -- now an explicit per-model `role`, §9 risk 20). `qwen3-coder-480b-awq` (community AWQ-INT4, ~262 GB, verified via HF API before staging) staged and role=primary; `qwen3-32b` role=small. Avante.nvim wired to the gateway as a real second client alongside Claude Code (`~/.config/nvim/lua/plugins/avante.lua`), verified via a real streamed completion built from Avante's own request-generation code, not a hand-rolled equivalent. Queue-aware UX, metrics, and K2 INT4 conversion not started |
 
 ---
 
@@ -485,3 +485,36 @@ Claude Code setup silently fails.
     completion succeeded through the actual TP4/PP4 endpoint
     (`system_fingerprint: vllm-0.27.1-tp4-pp4-...`), and 10/10 concurrent requests succeeded
     (200 OK, ~0.6s each). Phase 4's core mechanism is proven.
+19. **`hf download` deterministically failed on one specific file of a large repo, every
+    time, via a real `httpx`/`brotlicffi` bug -- not network flakiness.** Staging
+    `qwen3-coder-480b-awq` (~262 GB, 65 files) failed twice in a row, both times with
+    `httpx.DecodingError: brotli: decoder process called with data when
+    'can_accept_more_data()' is False`, both times after all 53 (large) safetensors shards
+    had already downloaded successfully. Diffing the expected file list (fetched via the HF
+    tree API) against what was actually on disk pinned it to exactly one file:
+    `model.safetensors.index.json`, a small (8.2 MB) JSON manifest -- the shard weights
+    downloaded fine both times, only this one file's response consistently broke the
+    brotli decoder. Retrying the same `hf download` invocation reproduced the identical
+    failure rather than succeeding on a different attempt, which is what pointed at a
+    deterministic transport bug (specific to how this file's response happens to get
+    brotli-encoded/chunked) rather than a transient CDN hiccup. Fixed by fetching that one
+    file directly with `curl` instead (a different, unaffected code path), then verifying
+    completeness two ways: every file the HF tree API lists is present locally, and every
+    shard filename referenced inside the (now-downloaded) index actually exists on disk.
+    **If a future large download fails deterministically on retry** (same file, same error,
+    not just "some file timed out"), don't just keep retrying the same tool -- diff the
+    expected vs. actual file list first, and fetch the specific straggler a different way.
+20. **Adding a real second model exposed a routing bug that would have silently misdirected
+    Claude Code's traffic.** `mr.gateway.render()` picked the sonnet/opus target as
+    `models[0]` (alphabetically first) and the haiku target as whichever model had "32b" in
+    its name -- both of which only ever worked because `qwen3-32b` was the sole configured
+    model. `"qwen3-32b"` sorts before `"qwen3-coder-480b-awq"` alphabetically, so adding the
+    real flagship without fixing this would have kept routing sonnet/opus to the *small*
+    model, silently -- no error, just the wrong model serving real requests. Caught by
+    inspection while adding the second model, not live. Fixed with an explicit per-model
+    `role` field (`"primary"` / `"small"`, `config.ModelSpec.role`) that `render()` checks
+    first, falling back to the old heuristic only when nothing sets it (so a pre-existing
+    single-model config keeps working unchanged).
+    `tests/test_gateway.py::test_primary_role_wins_over_alphabetical_order` locks this in
+    with deliberately alphabetically-hostile model names, so a regression here fails loudly
+    instead of silently misrouting again.

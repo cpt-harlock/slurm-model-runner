@@ -186,11 +186,51 @@ its own error), and `--min-nodes` on `ray symmetric-run` (undocumented as requir
 no stated guarantee otherwise that the entrypoint waits for every node before running). Full
 narrative, including the first attempt's failure, in `docs/architecture.md` §9 risk 18.
 
-**Not yet done**: the actual flagship model. Qwen3-Coder-480B-A35B (~960 GB BF16) doesn't fit
-in `$FAST`'s 1 TB quota next to the existing Qwen3-32B weights (939 GB free) — needs more
-storage or the AWQ-INT4 conversion `docs/architecture.md` §5 already flags as separate work.
-NCCL/IB tuning beyond the HCAs already pinned in `vllm-server.sbatch` is untouched; nothing
-so far has needed more.
+**Not yet done**: the full BF16 flagship (~960 GB) doesn't fit in `$FAST` at all and needs
+5-6 nodes; the AWQ-INT4 version (~262 GB, 2 nodes) staged in Phase 5 below is the one
+actually running. NCCL/IB tuning beyond the HCAs already pinned in `vllm-server.sbatch` is
+untouched; nothing so far has needed more.
+
+## Phase 5 — multi-model routing (in progress)
+
+```bash
+mrctl stage qwen3-coder-480b-awq   # ~262 GB AWQ-INT4 community checkpoint; verify size via
+                                    # the HF tree API before staging a repo this large
+mrctl up qwen3-coder-480b-awq
+```
+
+Adding a real second model exposed a routing bug before it ever shipped: `mr.gateway`
+picked the sonnet/opus target as `models[0]` (alphabetical) and the haiku target via a
+`"32b"` name match — both only ever worked because `qwen3-32b` was the sole model
+configured. `"qwen3-32b"` sorts *before* `"qwen3-coder-480b-awq"`, so this would have
+silently kept routing real Claude Code traffic to the small model. Fixed with an explicit
+per-model `role` (`"primary"`/`"small"` in `config.ModelSpec`), checked first, falling back
+to the old heuristic only when unset. `tests/test_gateway.py` locks it in with
+alphabetically-hostile model names. Full narrative: `docs/architecture.md` §9 risk 20.
+
+Staging the ~262 GB checkpoint hit a real, reproducible bug: `hf download` failed twice in
+a row with an identical `httpx`/`brotlicffi` decoding error, both times on the exact same
+file (`model.safetensors.index.json`, 8.2 MB) — not random flakiness, since a retry
+reproduced it exactly rather than succeeding or failing differently. Diffing the HF tree
+API's file list against what was actually on disk pinned it to that one file; fetched it
+directly with `curl` instead (an unaffected code path), then verified completeness two
+ways (every listed file present, every shard the index references exists). §9 risk 19 has
+the full story — worth knowing if a future large download fails identically on retry.
+
+Avante.nvim is wired to the gateway as a real second client alongside Claude Code
+(`~/.config/nvim/lua/plugins/avante.lua`, overriding LazyVim's `ai.avante` extra): two
+custom OpenAI-compatible providers, `model-runner` (flagship) and `model-runner-fast`
+(`qwen3-32b`), no API key needed (gateway has no master key), a 5-minute timeout to cover a
+lazy-wake cold start. Verified three ways, not just configured: the spec loads cleanly in a
+real headless Neovim + avante.nvim session, the exact request Avante's own code builds
+matches the gateway's expectations, and firing that exact request against the live backend
+returned a correct streamed completion (reasoning content separated from the final answer,
+correct `finish_reason` and usage). One caveat: Avante doesn't know to retry a cold-model
+response automatically (unlike this project's own lazy-wake design intent) — the first
+request after idle-reaping shows an error; resend it once `mrctl status` shows `ready`.
+
+**Not started**: queue-aware UX (a real Slurm-start-estimate ETA in the waker's response,
+instead of the current rough "~1-4 min" guess), metrics, and the K2-class INT4 conversion.
 
 ## Constraints worth remembering
 
