@@ -113,9 +113,19 @@ def render(model_status: dict[str, registry.Backend | None]) -> str:
     # string -- see router_utils/pattern_match_deployments.py in the installed
     # package), so this survives model version churn: any Claude Code release,
     # any Sonnet/Opus/Haiku snapshot, without re-pinning exact IDs here.
+    # Which model answers to sonnet/opus ("primary") vs haiku ("small") is an
+    # explicit per-model `role` (architecture.md §7), not inferred: picking
+    # models[0] (alphabetical) and matching "32b" in the name only ever
+    # worked because qwen3-32b was the only model configured. Falls back to
+    # that old heuristic if nothing sets `role` explicitly, so a single-model
+    # deployment that predates this still works unchanged.
     models = list(model_status)
-    primary_model = models[0]
-    small_model = next((m for m in models if "32b" in m), primary_model)
+    roles = {m: config.load(m).role for m in models}
+    primary_model = next((m for m in models if roles[m] == "primary"), models[0])
+    small_model = next(
+        (m for m in models if roles[m] == "small"),
+        next((m for m in models if "32b" in m), primary_model),
+    )
     for pattern, target_model in (
         ("claude-*sonnet*", primary_model),
         ("claude-*opus*", primary_model),

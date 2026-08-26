@@ -6,6 +6,13 @@
 # it is the difference between a 5-minute and a 40-minute cold start.
 set -euo pipefail
 
+# Login nodes ship RLIMIT_CPU=600s soft (hard is unlimited) -- see
+# scripts/build-container.sh and architecture.md §9 risk 3. Untested at this
+# scale before: `hf download`'s per-file hashing/verification is real CPU
+# work, and this repo (~262 GB) is ~4x anything staged here so far. Cheaper
+# to raise it now than to find out 45 minutes into a multi-hour download.
+ulimit -t unlimited
+
 REPO="${1:?usage: stage-model.sh <hf_repo> <dest_dir>}"
 DEST="${2:?usage: stage-model.sh <hf_repo> <dest_dir>}"
 

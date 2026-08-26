@@ -1,0 +1,44 @@
+# Flagship for Claude Code (architecture.md §5). Full BF16 (~960 GB) does not
+# fit in $FAST's 1 TB quota alongside qwen3-32b's weights (939 GB free) and
+# needs 5-6 nodes; this AWQ-INT4 community checkpoint (~262 GB, verified via
+# the HF API before staging: 53 safetensors files, ungated) fits comfortably
+# and needs half the nodes. Marlin kernels run AWQ-INT4 fine on Ampere (SM80)
+# -- this is not the FP8 problem (see EngineSpec's fp8 warning): AWQ quantizes
+# weights only, not something A100 lacks hardware support for.
+name = "qwen3-coder-480b-awq"
+hf_repo = "TechxGenus/Qwen3-Coder-480B-A35B-Instruct-AWQ"
+role = "primary"         # answers Claude Code's sonnet/opus alias; see mr.gateway
+
+idle_timeout_s = 1800
+# No measured load time yet (Phase 0's 244s was for a 62 GB checkpoint on 1
+# node; this is a 262 GB checkpoint striped across 2). Placeholder until a
+# real bring-up measures it -- see README's Phase 0 section for the pattern.
+handoff_lead_s = 3600
+
+[slurm]
+account = "cin_staff"
+partition = "boost_usr_prod"
+qos = "boost_qos_lprod"       # 4 days, <=8 nodes / 32 GPUs; this uses 2
+nodes = 2
+time = "4-00:00:00"
+cpus_per_task = 32
+gpus_per_node = 4
+
+[engine]
+tensor_parallel_size = 4      # TP within each node, over NVLink
+pipeline_parallel_size = 2    # PP across the 2 nodes, over IB
+# Native max_position_embeddings is 262144 (262K) per the checkpoint's
+# config.json. Starting well below that: GQA (8 KV heads, head_dim 128) keeps
+# per-token KV cache small (~250 KB/token), but this is untested on real
+# hardware -- raise it once a real bring-up confirms the KV budget, rather
+# than guessing at the ceiling on the first try.
+max_model_len = 65536
+gpu_memory_utilization = 0.85 # match qwen3-32b-4n's conservative TP4/PP-multi
+                               # value; no measured --kv-cache-memory-bytes
+                               # exists yet for this checkpoint/topology (see
+                               # architecture.md §9 risk 9 -- that value never
+                               # carries over between topologies, it has to be
+                               # re-measured each time from the real diagnostic)
+extra_args = [
+  "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
+]

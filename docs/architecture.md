@@ -256,9 +256,9 @@ Claude Code setup silently fails.
    which reads like a Singularity bug and is not. **Every long-running or CPU-heavy login-node
    entry point must raise the limit explicitly** (`ulimit -t unlimited` in shell,
    `supervisor.raise_cpu_limit()` in Python). The hard limit is unlimited, so this needs no
-   privilege. Currently applied in: `scripts/build-container.sh`, `mr.supervisor.run`,
-   `mr.gateway.run`. Site policy is not a concern here — the operator is a site sysadmin — but
-   the kernel limit binds regardless.
+   privilege. Currently applied in: `scripts/build-container.sh`, `scripts/stage-model.sh`,
+   `mr.supervisor.run`, `mr.gateway.run`. Site policy is not a concern here — the operator is a
+   site sysadmin — but the kernel limit binds regardless.
 4. **Compute → login reachability is untested.** The Lustre-based registry deliberately avoids
    depending on it. Don't introduce a design that needs it without testing first.
 5. **Multi-user.** If this serves a team rather than one person, LiteLLM virtual keys cover

@@ -37,6 +37,35 @@ class RenderTest(unittest.TestCase):
             out = gateway.render({"qwen3-32b": None})
         self.assertIn(f"api_base: http://127.0.0.1:{gateway.WAKER_PORT}/qwen3-32b/v1", out)
 
+    def test_primary_role_wins_over_alphabetical_order(self):
+        # "aaa-small" sorts first alphabetically; the old logic picked
+        # models[0] as primary and matched "32b" in the name for small,
+        # which only ever worked because qwen3-32b was the only model
+        # configured. A real second model that doesn't happen to sort last
+        # would have silently routed sonnet/opus to the small model instead
+        # -- caught before it ever shipped, not live.
+        small = registry.Backend(model="aaa-small", served_name="aaa-small", job_id="1",
+                                  state=registry.READY, host="h1", port=8001)
+        primary = registry.Backend(model="zzz-primary", served_name="zzz-primary", job_id="2",
+                                    state=registry.READY, host="h2", port=8002)
+
+        def fake_load(name):
+            spec = type("Spec", (), {})()
+            spec.engine = type("Engine", (), {"max_model_len": 32768})()
+            spec.role = "small" if name == "aaa-small" else "primary"
+            return spec
+
+        with patch("mr.config.load", side_effect=fake_load):
+            out = gateway.render({"aaa-small": small, "zzz-primary": primary})
+
+        blocks = {
+            block.splitlines()[0]: block
+            for block in out.split("  - model_name: ")[1:]
+        }
+        self.assertIn("h2:8002", blocks["claude-*sonnet*"])
+        self.assertNotIn("h1:8001", blocks["claude-*sonnet*"])
+        self.assertIn("h1:8001", blocks["claude-*haiku*"])
+
 
 class WakerTest(unittest.TestCase):
     def setUp(self) -> None:

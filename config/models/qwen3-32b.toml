@@ -2,6 +2,7 @@
 # Doubles as ANTHROPIC_SMALL_FAST_MODEL for Claude Code's background tasks.
 name = "qwen3-32b"
 hf_repo = "Qwen/Qwen3-32B"
+role = "small"           # answers Claude Code's "haiku" alias; see mr.gateway
 
 idle_timeout_s = 1800    # reap after 30 min idle to protect the allocation
 handoff_lead_s = 3000    # 244s measured load (job 54085509) x1.5 (=366s) + ~45min

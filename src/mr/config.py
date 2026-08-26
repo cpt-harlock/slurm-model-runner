@@ -65,6 +65,14 @@ class ModelSpec:
     # Lead time for launching the successor job before this one hits its wall.
     # Placeholder until Phase 0 measures a real Lustre load time (see docs/architecture.md §6).
     handoff_lead_s: int = 3600
+    # Which Claude Code alias this model should answer to -- "primary" for
+    # sonnet/opus, "small" for haiku (architecture.md §7). Explicit, not
+    # inferred: mr.gateway used to pick models[0] (alphabetical) as primary
+    # and match "32b" in the name as small, which only ever worked because
+    # qwen3-32b was the only model configured. Adding a real flagship that
+    # doesn't happen to sort first would have silently routed sonnet/opus to
+    # the small model instead -- caught before it ever shipped, not live.
+    role: str = ""
 
     def __post_init__(self) -> None:
         self.served_name = self.served_name or self.name
@@ -89,6 +97,7 @@ def load(name: str) -> ModelSpec:
         weights_dir=raw.get("weights_dir", ""),
         idle_timeout_s=raw.get("idle_timeout_s", 1800),
         handoff_lead_s=raw.get("handoff_lead_s", 3600),
+        role=raw.get("role", ""),
         slurm=SlurmSpec(**raw.get("slurm", {})),
         engine=EngineSpec(**raw.get("engine", {})),
     )
