@@ -191,7 +191,7 @@ narrative, including the first attempt's failure, in `docs/architecture.md` §9 
 actually running. NCCL/IB tuning beyond the HCAs already pinned in `vllm-server.sbatch` is
 untouched; nothing so far has needed more.
 
-## Phase 5 — multi-model routing (in progress)
+## Phase 5 — multi-model routing (done, live-verified)
 
 ```bash
 mrctl stage qwen3-coder-480b-awq   # ~262 GB AWQ-INT4 community checkpoint; verify size via
@@ -228,6 +228,33 @@ returned a correct streamed completion (reasoning content separated from the fin
 correct `finish_reason` and usage). One caveat: Avante doesn't know to retry a cold-model
 response automatically (unlike this project's own lazy-wake design intent) — the first
 request after idle-reaping shows an error; resend it once `mrctl status` shows `ready`.
+
+The flagship's first real bring-up (job 54379904, `READY after 407s`, TP4×PP2 across 2
+nodes) surfaced a bug the earlier tests couldn't have caught: `--tool-call-parser hermes`
+(correct for `qwen3-32b`, copied over without checking) doesn't match this model's tool-call
+syntax — a `get_weather` request came back as *raw unparsed XML text* in `content`, no error,
+just silently unusable, exactly what architecture.md §7 calls "the most common way a
+self-hosted Claude Code setup silently fails." Checked the container's own tool-parser
+registry instead of guessing: `qwen3_coder` is the one actually registered for this syntax.
+Resubmitted (job 54381732, `READY after 348s`) and confirmed live — proper `tool_calls`
+array, correct arguments, `finish_reason: "tool_calls"`. **Lesson**: `--tool-call-parser`
+is per-model-family, not per-vendor; "it's a Qwen model" isn't enough to assume a sibling
+model's parser carries over.
+
+Then hit a second bug getting `sonnet` to actually resolve to the newly-role-tagged
+flagship: it kept resolving to `qwen3-32b` even after the role fix and the new model were
+both live. Not a bug in the fix (confirmed correct by the unit test and a direct check) —
+the running `mr.gateway` process had been up since before the fix was written, still
+running the old alphabetical-order logic in memory with no way to know newer code existed
+on disk. Same hazard as risk 15, just failing silently instead of crashing loudly this
+time. Restarting the gateway fixed it immediately. **There's no automatic detection for
+this yet** — restarting `mr.cli gateway`/`mr.cli supervise` after a code change that
+affects their behavior is still a manual step. Full narrative: `docs/architecture.md` §9
+risks 21-22.
+
+End-to-end proof, not just each piece in isolation: the real `claude` CLI, using the
+`sonnet` alias, used its own `Read` tool against the flagship model and got the correct
+answer — the same test pattern as Phase 2, now against the actual production model.
 
 **Not started**: queue-aware UX (a real Slurm-start-estimate ETA in the waker's response,
 instead of the current rough "~1-4 min" guess), metrics, and the K2-class INT4 conversion.

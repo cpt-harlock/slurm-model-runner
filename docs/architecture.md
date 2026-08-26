@@ -229,7 +229,7 @@ Claude Code setup silently fails.
 | **2** | LiteLLM gateway + client wiring | Claude Code completes a real **tool-using** task against the cluster — **done: the actual `claude` CLI (`--bare -p`, `ANTHROPIC_BASE_URL` pointed at the gateway) used its own `Read` tool to fetch a file's real contents end-to-end through vLLM (§9 risks 8, 10–12)** |
 | **3** | `mr.supervisor`: rolling handoff + idle reaping | Service survives a walltime expiry with no failed request — **in progress: drain state machine + activity-based idle reaping implemented and unit-tested (`tests/test_supervisor.py`); live-verified a full idle-reap-and-relaunch cycle (§9 risk 13); caught/fixed a real duplicate-launch bug on cold start (§9 risk 14); caught/fixed a schema-forward-compat bug that made a live gateway silently drop a healthy backend (§9 risk 15); live-verified the full drain cycle itself when two backends briefly went READY together -- `start_drain` fired, then the incumbent was cancelled within one tick once `refresh_activity()` saw its in-flight count reach zero, ending in exactly one healthy backend. The only piece still unverified live is *why* a second backend goes READY in the first place via the walltime path specifically (`launch_successor` firing because a job's wall is running out, rather than a manual `mrctl up`) -- that needs a job to actually approach its multi-day wall, which isn't practical to wait out; that trigger condition is covered by the unit tests instead** |
 | **4** | Multi-node via `ray symmetric-run`; flagship model; NCCL/IB tuning | 4+ nodes stable under load — **mechanism done: job 54343864, Qwen3-32B deliberately spread TP4/PP4 across 4 real nodes (16 GPUs), `READY after 167s`, 10/10 concurrent requests succeeded (§9 risk 18). Flagship model itself (Qwen3-Coder-480B) not yet attempted — needs more `$FAST` storage or the AWQ-INT4 conversion; NCCL/IB tuning beyond the existing pinned HCAs is untouched, nothing so far has needed it** |
-| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — **multi-model routing: in progress.** Fixed a real bug this exposed before it shipped (`mr.gateway` picked sonnet/opus's target by alphabetical order + a "32b" name match, which only worked with one model -- now an explicit per-model `role`, §9 risk 20). `qwen3-coder-480b-awq` (community AWQ-INT4, ~262 GB, verified via HF API before staging) staged and role=primary; `qwen3-32b` role=small. Avante.nvim wired to the gateway as a real second client alongside Claude Code (`~/.config/nvim/lua/plugins/avante.lua`), verified via a real streamed completion built from Avante's own request-generation code, not a hand-rolled equivalent. Queue-aware UX, metrics, and K2 INT4 conversion not started |
+| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — **multi-model routing: done for real, live-verified end to end.** `qwen3-coder-480b-awq` (community AWQ-INT4, ~262 GB) staged, brought up (TP4×PP2, 8 GPUs, `READY after 348s` on the tool-call-fixed run), and now serves Claude Code's real `sonnet` alias through the full stack: real CLI -> gateway -> flagship -> real `Read` tool use -> correct answer. Along the way: fixed a routing bug before it shipped (explicit per-model `role`, §9 risk 20), fixed tool calling that silently returned raw unparsed text instead of structured calls (`qwen3_coder` parser, not `hermes` -- §9 risk 21), and hit the exact stale-long-lived-gateway hazard risk 15 warned about, just failing silently instead of loudly this time (§9 risk 22). Both models run concurrently; Avante.nvim wired up as a second real client (`~/.config/nvim/lua/plugins/avante.lua`). Queue-aware UX, metrics, and K2 INT4 conversion not started |
 
 ---
 
@@ -518,3 +518,38 @@ Claude Code setup silently fails.
     `tests/test_gateway.py::test_primary_role_wins_over_alphabetical_order` locks this in
     with deliberately alphabetically-hostile model names, so a regression here fails loudly
     instead of silently misrouting again.
+21. **The flagship's first real bring-up (job 54379904) worked, but tool calling silently
+    didn't.** `--tool-call-parser hermes` -- correct for `qwen3-32b`, copied over without
+    checking -- doesn't match this model's actual tool-call syntax. A `get_weather` request
+    came back with the tool call as *raw unparsed text* in `content`
+    (`<tool_call><function=get_weather><parameter=city>Rome</parameter></function>
+    </tool_call>`), not a structured `tool_calls` array: no error anywhere, just an unusable
+    response, exactly the failure mode architecture.md §7 warns is the most common way a
+    self-hosted Claude Code setup silently breaks. Root cause: Qwen3-Coder emits tool calls
+    in an XML format hermes doesn't parse. Fixed by checking the container's own tool parser
+    registry (`vllm/tool_parsers/__init__.py`) instead of guessing: `qwen3_coder` (alias
+    `qwen3_xml`) is the one actually registered for this exact syntax
+    (`Qwen3EngineToolParser`, `structural_tag_model = "qwen_3_coder"`). Resubmitted (job
+    54381732, `READY after 348s`) and confirmed live: the same request now returns a proper
+    `tool_calls` array with correctly parsed arguments and `finish_reason: "tool_calls"`.
+    **Lesson: `--tool-call-parser` is per-model-family, not per-vendor** -- "it's a Qwen
+    model" was not enough to assume `hermes` would work; check what the model actually
+    emits before declaring tool calling functional, the same way max_model_len and
+    kv-cache-memory-bytes already get checked against the real checkpoint rather than
+    copied from another model's config.
+22. **The running gateway silently routed `sonnet` to the wrong model for ~50 minutes after
+    the fix that was supposed to prevent exactly that (risk 20) had already landed.** After
+    staging and first testing the flagship, `sonnet` was still resolving to `qwen3-32b` --
+    not a bug in the fix itself (confirmed correct via `tests/test_gateway.py` and a direct
+    headless-Neovim-style check), but because the live `mr.gateway` process had been running
+    since 10:52, hours before the `role`-field commit at 14:43. It had the *old* alphabetical
+    + `"32b"`-substring logic loaded in memory and no way to know newer code existed on disk.
+    This is the same long-lived-process-vs-fresh-code asymmetry as risk 15, but with a
+    different failure shape: risk 15 crashed loudly (schema mismatch, `TypeError`), this one
+    failed silently (still perfectly valid Python, just stale logic) -- confirmed by checking
+    the gateway process's start time against the fix's commit time, then restarting it, after
+    which `sonnet` correctly resolved to the flagship immediately. **There is currently no
+    mechanism that detects this automatically** -- restarting `mr.cli gateway` (and
+    `mr.cli supervise`) after any code change that affects their behavior is a manual step an
+    operator has to remember. Worth a real fix later (e.g. a content-hash check that triggers
+    a self-restart), but not yet built.
