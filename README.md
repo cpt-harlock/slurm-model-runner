@@ -1,10 +1,33 @@
 # model-runner
 
-LLM inference serving on **Leonardo (CINECA)**: multi-node vLLM under Slurm, exposed
-through a login-node gateway that Claude Code and Avante.nvim can talk to.
+Self-hosted LLM inference on an HPC Slurm cluster ([CINECA Leonardo](https://www.hpc.cineca.it/systems/hardware/leonardo/)),
+exposed through an OpenAI/Anthropic-compatible gateway that [Claude Code](https://claude.com/claude-code)
+and [Avante.nvim](https://github.com/yetone/avante.nvim) can talk to directly.
 
-See **[docs/architecture.md](docs/architecture.md)** for the design, the measured
-cluster facts it rests on, and the phased plan.
+Compute nodes have no internet access and no local disk, jobs get killed on wall-time
+limits, and GPU allocations are shared and expensive to leave idle — this project handles
+all three: [vLLM](https://github.com/vllm-project/vllm) under Singularity does the actual
+serving (single- or multi-node, via Ray), a small supervisor daemon reconciles Slurm state
+against desired state (rolling handoff before wall-time expiry, idle reaping, lazy
+cold-start on demand), and a login-node gateway renders live backend state into a
+[LiteLLM](https://github.com/BerriAI/litellm) config so clients always see a stable
+endpoint regardless of which compute nodes are actually running it.
+
+See **[docs/architecture.md](docs/architecture.md)** for the full design: measured cluster
+constraints, the topology/quantization tradeoffs behind each model choice, the phased
+build-out, and a running log of concrete issues hit and how they were fixed.
+
+## Status
+
+| Model | Role | Nodes | Status |
+|---|---|---|---|
+| `qwen3-32b` | fast/small | 1 | serving |
+| `qwen3-coder-480b-awq` | primary (flagship) | 2 | serving |
+| `kimi-k2-thinking` | — | 4 | staged, blocked on an upstream vLLM/tool-parser bug |
+
+Both serving models are lazy-wake: idle backends are reaped automatically and cold-started
+again on the next request. See `docs/architecture.md` §9 for open risks and known
+limitations, including the Kimi blocker.
 
 ## Layout
 
@@ -34,307 +57,60 @@ export MR_STATE=$SCRATCH/model-runner       # registry, logs, caches
 export MR_WEIGHTS=$FAST/weights             # flash tier -- there is no node-local disk
 export PYTHONPATH=$MR_ROOT/src:$PYTHONPATH
 alias mrctl='python3 -m mr.cli'
+
+./scripts/build-container.sh                # login node only; needs internet
 ```
 
-## Phase 0 — get one model serving
+## Usage
 
 ```bash
-./scripts/build-container.sh              # login node; needs internet
-mrctl stage qwen3-32b                     # login node; stripes then downloads
-mrctl up qwen3-32b
-mrctl status
-curl http://<node>:<port>/v1/models       # login->compute is direct, no tunnel
+mrctl models                    # list configured models
+mrctl stage <model>              # download weights to $MR_WEIGHTS (login node only)
+mrctl up <model>                 # submit a Slurm job for this model
+mrctl status                     # show live backends: state, node, port, wall time left
+mrctl down <model>                # cancel all backends for a model, clear lazy-wake demand
+mrctl gateway                    # run the LiteLLM gateway (owns the client-facing endpoint)
+mrctl supervise                  # run the reconcile loop (rolling handoff, idle reaping)
 ```
 
-The `READY after Ns` line in `$MR_STATE/logs/qwen3-32b.<jobid>.out` is the Lustre
-load time. **Record it** — it sets `handoff_lead_s` for every model, and it is the
-main unknown the rest of the design is parameterised on.
+`mrctl gateway` and `mrctl supervise` are meant to run continuously (e.g. under `systemd
+--user`, `tmux`, or a login-node cron-managed respawn) — the gateway is the one process
+clients actually connect to, and the supervisor is what keeps backends matching desired
+state without a human watching Slurm queues.
 
-Measured (job 54085509): **244s** cold off Lustre for Qwen3-32B/TP4, striped `-c 16 -S
-4M`. `config/models/qwen3-32b.toml` sets `handoff_lead_s = 3000` from this.
-
-## Phase 2 — LiteLLM gateway
+Point a client at the gateway (default `127.0.0.1:4000`) over an SSH tunnel from off-cluster
+(login nodes are not internet-reachable, by design — see Constraints below):
 
 ```bash
-PIP_CACHE_DIR=$MR_STATE/cache/pip pip install --user "litellm[proxy]"   # one-time, login node
-mrctl gateway                              # owns litellm; renders config from the registry,
-                                            # restarts it whenever the backend set changes
+ssh -L 4000:localhost:4000 <user>@login.leonardo.cineca.it
+
+export ANTHROPIC_BASE_URL=http://127.0.0.1:4000   # Claude Code
+export OPENAI_BASE_URL=http://127.0.0.1:4000/v1   # Avante.nvim / any OpenAI-compatible client
 ```
 
-Verified end-to-end against a live backend: OpenAI-format `/v1/chat/completions`
-(Avante), Anthropic-format `/v1/messages` (Claude Code), tool calling (`get_weather`
-round-trip returned a correct `tool_use` block), and SSE streaming on `/v1/messages`.
-
-Then verified with the **actual `claude` CLI**, not just raw `curl`:
-
-```bash
-cd /some/test/dir   # anywhere claude can read a file from, for a real tool-use check
-ANTHROPIC_BASE_URL=http://127.0.0.1:4000 ANTHROPIC_API_KEY=sk-local-litellm-test \
-  claude --bare -p --model sonnet --allowedTools=Read "Read secret.txt and tell me what it says."
-```
-
-This surfaced three real bugs the raw-`curl` tests didn't catch (all fixed, all in
-`docs/architecture.md` §9 risks 10–12): Claude Code resolves `--model sonnet` to
-`claude-sonnet-5` client-side, so the original `model_alias_map` (keyed on the bare
-word) never matched — fixed with wildcard `model_list` entries; Claude Code's default
-`max_tokens=64000` exceeds any of our models' context — fixed with
-`model_info.max_output_tokens` + `litellm_settings.modify_params: true`; and Qwen3's
-`<think>` block leaked into the visible response — fixed with `--reasoning-parser qwen3`.
-
-```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:4000   # Claude Code, after an SSH tunnel to the login node
-export OPENAI_BASE_URL=http://127.0.0.1:4000/v1   # Avante
-```
-
-No `LITELLM_MASTER_KEY` is set yet — fine while this is single-user and the proxy only
-listens on `127.0.0.1`, revisit for §9 risk 5 (multi-user).
-
-## Phase 3 — supervisor (rolling handoff + idle reaping)
-
-```bash
-PYTHONPATH=src python3 -m unittest tests.test_supervisor -v   # decide() is pure; no cluster needed
-mrctl supervise                                                # the real reconcile loop
-```
-
-`decide()` (pure, unit-tested) reads the registry and Slurm state and returns what to do;
-`refresh_activity()` (the one I/O step, scrapes each backend's own vLLM `/metrics`) and
-`apply()` carry it out. Three real bugs were caught by actually running this against a live
-backend rather than trusting the unit tests alone (all in `docs/architecture.md` §9,
-risks 13-15):
-
-- Idle detection originally used the heartbeat, which never goes stale enough to fire since
-  it refreshes every 30s regardless of real traffic.
-- The very first cold start (empty registry, nothing running yet) launched three duplicate
-  jobs a tick apart, because a job has no registry record until its own script starts
-  running, which can be minutes after `sbatch` returns on a busy queue.
-- A long-lived `mrctl gateway` process silently dropped a perfectly healthy backend for
-  ~34 minutes after a mid-session schema change to the registry's `Backend` record — its
-  in-memory class was older than what a compute job's (always-fresh-code) heartbeat had
-  started writing, so every read raised a silently-swallowed `TypeError`. Fixed structurally:
-  `registry.read_all()` now filters unknown JSON keys before constructing, so an old reader
-  survives a newer writer instead of losing the record. This is a real, recurring hazard for
-  this architecture (long-lived login-node processes vs. always-fresh compute jobs) any time
-  `Backend`'s shape changes — not a one-off.
-
-**Live-verified end to end, not just unit-tested**: a genuinely idle backend was correctly
-reaped after exactly one `idle_timeout_s` window and the supervisor launched a fresh
-replacement with no manual intervention; and — caught by accident when a manual `mrctl up`
-raced the supervisor's own cold-start launch — two backends briefly went READY together,
-`start_drain` correctly picked the older one, and it was cancelled within one tick once
-`refresh_activity()` saw its in-flight count reach zero, ending in exactly one healthy
-backend. **Not yet live-verified**: the walltime-*triggered* path specifically (a job
-launching a successor because its own wall is running out, rather than any other reason two
-backends end up READY) — that needs a job to actually approach its multi-day wall, which
-isn't practical to wait out; that trigger condition rests on the unit tests instead.
-
-Operational note (§9 risk 16): once the supervisor is running, manual `mrctl up` for
-cold-start recovery is redundant and can race it — reach for `mrctl up --force` only to
-deliberately add a replica or replace a specific job.
-
-### Lazy-wake (§9 risk 17)
-
-Idle-reaping only saves anything if the backend it cancels actually *stays down* until
-someone wants it again. Caught live: 22 reap/relaunch cycles overnight, none of them
-saving a thing, because `desired` was hardcoded to 1 forever. Fixed with `mr.demand` (a
-tiny persisted per-model flag — `reap_idle` clears it, the supervisor reads it fresh every
-tick) plus a "waker" stub `mr.gateway` runs (`_WakerHandler`, `127.0.0.1:4100`): a cold
-model still gets a real `model_list` row in LiteLLM, pointed at the waker instead of a
-vLLM URL, so a request for it bumps demand back to 1 and gets an immediate, clear answer
-instead of an opaque routing error. The supervisor's next tick (≤ 60s) sees the demand and
-cold-starts it.
-
-Getting the waker's response right took two real bugs, both invisible except over real
-HTTP: not draining the request body risked stalling an HTTP/1.1 client mid-connection, and
-— the actual cause of a ~90+ second hang with zero log output — answering with **503**
-makes LiteLLM auto-retry it as a transient `ServiceUnavailableError` before ever replying
-to the client. **400** (correctly: this isn't infra flakiness, it's "come back later")
-returns in under 100ms. `tests/test_gateway.py` locks this in with a real HTTP round-trip,
-not just a direct handler call — that's the only way this class of bug shows up at all.
-
-```bash
-curl http://127.0.0.1:4000/v1/chat/completions -d '{"model":"qwen3-32b", ...}'  # cold
-# -> immediate 400, "model 'qwen3-32b' is cold; a start has been triggered ..."
-# retry in ~1-4 min once the supervisor's next tick launches it
-```
-
-## Phase 4 — multi-node
-
-```bash
-./scripts/build-container.sh v0.27.1-cu129   # rebuild: `ray` isn't in the upstream image at all
-mrctl up qwen3-32b-4n                        # validation config: Qwen3-32B deliberately spread
-                                              # TP4/PP4 across 4 real nodes, no new download needed
-```
-
-`ray` is not on `PATH` or importable in the upstream `vllm/vllm-openai` image — confirmed
-empirically. Adding it needed a real container customization step, and `--fakeroot` is
-unavailable on this system (no subuid/subgid mapping for this user), which rules out a `.def`
-file's `%post`. `scripts/build-container.sh` now builds an unprivileged writable **sandbox**
-(same as the plain `docker://` pull always did), `pip install`s `ray[default]` directly into
-it, then repacks to an immutable `.sif`. Two things bit this specifically, both fixed in the
-script: a writable sandbox can't auto-create missing bind targets (`mkdir -p` Leonardo's
-top-level mountpoints into the sandbox first), and `-C`/`--containall` — only ever there to
-dodge that mount error — swaps in a tiny tmpfs home/tmp and made `pip`'s download overflow it
-with `No space left on device` despite `$SCRATCH` having petabytes free.
-
-**Live-verified, not just started**: job 54343864, Qwen3-32B (TP4×PP4, 16 GPUs, 4 real nodes)
-reached `READY after 167s` with correct per-node rank/PP/TP assignment in the log, a real
-completion succeeded through the actual TP4/PP4 endpoint, and 10/10 concurrent requests
-succeeded (200 OK, ~0.6s each) — Phase 4's "4+ nodes stable under load" exit criterion, met.
-Getting there needed two more fixes: `--distributed-executor-backend ray` (vLLM assumes
-single-node otherwise, even under a live multi-node Ray cluster — it names this exact flag in
-its own error), and `--min-nodes` on `ray symmetric-run` (undocumented as required, but there's
-no stated guarantee otherwise that the entrypoint waits for every node before running). Full
-narrative, including the first attempt's failure, in `docs/architecture.md` §9 risk 18.
-
-**Not yet done**: the full BF16 flagship (~960 GB) doesn't fit in `$FAST` at all and needs
-5-6 nodes; the AWQ-INT4 version (~262 GB, 2 nodes) staged in Phase 5 below is the one
-actually running. NCCL/IB tuning beyond the HCAs already pinned in `vllm-server.sbatch` is
-untouched; nothing so far has needed more.
-
-## Phase 5 — multi-model routing (done, live-verified)
-
-```bash
-mrctl stage qwen3-coder-480b-awq   # ~262 GB AWQ-INT4 community checkpoint; verify size via
-                                    # the HF tree API before staging a repo this large
-mrctl up qwen3-coder-480b-awq
-```
-
-Adding a real second model exposed a routing bug before it ever shipped: `mr.gateway`
-picked the sonnet/opus target as `models[0]` (alphabetical) and the haiku target via a
-`"32b"` name match — both only ever worked because `qwen3-32b` was the sole model
-configured. `"qwen3-32b"` sorts *before* `"qwen3-coder-480b-awq"`, so this would have
-silently kept routing real Claude Code traffic to the small model. Fixed with an explicit
-per-model `role` (`"primary"`/`"small"` in `config.ModelSpec`), checked first, falling back
-to the old heuristic only when unset. `tests/test_gateway.py` locks it in with
-alphabetically-hostile model names. Full narrative: `docs/architecture.md` §9 risk 20.
-
-Staging the ~262 GB checkpoint hit a real, reproducible bug: `hf download` failed twice in
-a row with an identical `httpx`/`brotlicffi` decoding error, both times on the exact same
-file (`model.safetensors.index.json`, 8.2 MB) — not random flakiness, since a retry
-reproduced it exactly rather than succeeding or failing differently. Diffing the HF tree
-API's file list against what was actually on disk pinned it to that one file; fetched it
-directly with `curl` instead (an unaffected code path), then verified completeness two
-ways (every listed file present, every shard the index references exists). §9 risk 19 has
-the full story — worth knowing if a future large download fails identically on retry.
-
-Avante.nvim is wired to the gateway as a real second client alongside Claude Code
-(`~/.config/nvim/lua/plugins/avante.lua`, overriding LazyVim's `ai.avante` extra): two
-custom OpenAI-compatible providers, `model-runner` (flagship) and `model-runner-fast`
-(`qwen3-32b`), no API key needed (gateway has no master key), a 5-minute timeout to cover a
-lazy-wake cold start. Verified three ways, not just configured: the spec loads cleanly in a
-real headless Neovim + avante.nvim session, the exact request Avante's own code builds
-matches the gateway's expectations, and firing that exact request against the live backend
-returned a correct streamed completion (reasoning content separated from the final answer,
-correct `finish_reason` and usage). One caveat: Avante doesn't know to retry a cold-model
-response automatically (unlike this project's own lazy-wake design intent) — the first
-request after idle-reaping shows an error; resend it once `mrctl status` shows `ready`.
-
-The flagship's first real bring-up (job 54379904, `READY after 407s`, TP4×PP2 across 2
-nodes) surfaced a bug the earlier tests couldn't have caught: `--tool-call-parser hermes`
-(correct for `qwen3-32b`, copied over without checking) doesn't match this model's tool-call
-syntax — a `get_weather` request came back as *raw unparsed XML text* in `content`, no error,
-just silently unusable, exactly what architecture.md §7 calls "the most common way a
-self-hosted Claude Code setup silently fails." Checked the container's own tool-parser
-registry instead of guessing: `qwen3_coder` is the one actually registered for this syntax.
-Resubmitted (job 54381732, `READY after 348s`) and confirmed live — proper `tool_calls`
-array, correct arguments, `finish_reason: "tool_calls"`. **Lesson**: `--tool-call-parser`
-is per-model-family, not per-vendor; "it's a Qwen model" isn't enough to assume a sibling
-model's parser carries over.
-
-Then hit a second bug getting `sonnet` to actually resolve to the newly-role-tagged
-flagship: it kept resolving to `qwen3-32b` even after the role fix and the new model were
-both live. Not a bug in the fix (confirmed correct by the unit test and a direct check) —
-the running `mr.gateway` process had been up since before the fix was written, still
-running the old alphabetical-order logic in memory with no way to know newer code existed
-on disk. Same hazard as risk 15, just failing silently instead of crashing loudly this
-time. Restarting the gateway fixed it immediately. **There's no automatic detection for
-this yet** — restarting `mr.cli gateway`/`mr.cli supervise` after a code change that
-affects their behavior is still a manual step. Full narrative: `docs/architecture.md` §9
-risks 21-22.
-
-End-to-end proof, not just each piece in isolation: the real `claude` CLI, using the
-`sonnet` alias, used its own `Read` tool against the flagship model and got the correct
-answer — the same test pattern as Phase 2, now against the actual production model.
-
-### Queue-aware UX (done)
-
-`mr.gateway._wake_eta_message()` replaced the fixed "~1-4 min" guess with real state: a new
-`measured_load_s` field per model (`config.ModelSpec`, populated by hand after each real
-bring-up, same pattern as `handoff_lead_s`), `slurm.start_estimate()` for a real queue-wait
-number when a job is already `PENDING` and Slurm has one to give (says so honestly when it
-doesn't, rather than inventing a number), and remaining-time-from-elapsed when a job is
-already `LOADING`. Live-verified through an actual cold start: "nothing yet" correctly used
-qwen3-32b's real 244s, and "queued, no Slurm estimate yet" correctly said so rather than
-guessing. `docs/architecture.md` §9 risk 23.
-
-### K2-class: Kimi-K2-Thinking (staged and brought up, but deprioritized — broken upstream)
-
-The INT4 conversion this phase originally scoped as a separate ML-engineering project turned
-out not to be needed — that assumption was against Kimi K2's *native FP8* checkpoint
-(~2 TB after dequant). Checked the Hugging Face API directly instead of assuming from
-(stale) memory: `moonshotai/Kimi-K2-Thinking` (594 GB) is already natively INT4-quantized
-(compressed-tensors, Marlin-compatible, same style as the Qwen3-Coder flagship) and built on
-`DeepseekV3ForCausalLM`, an architecture vLLM has supported for a long time. Two newer
-releases were checked and ruled out: `Kimi-K3` (1.56 TB, brand-new experimental
-linear-attention architecture, quantized in MXFP4 — likely hits the same
-no-native-tensor-core wall on Ampere that FP8 does) and `Kimi-K2.7-Code` (595 GB, same INT4
-quantization but wrapped in a newer multimodal-capable class — unneeded complexity for a
-text-only use case). `$FAST` after staging: 859 GB / 1 TB used, ~141 GB free.
-
-Checked vLLM's tool/reasoning-parser registries *before* bringing this up, not after finding
-out the hard way like the Qwen3-Coder flagship's first attempt did (§9 risk 21): this model's
-chat template uses Kimi-specific tool-call tokens and `<think>` reasoning, and vLLM has a
-dedicated `kimi_k2` parser for both — confirmed actually importable in the container before
-staging 594 GB, not assumed from the model name. Full narrative: `docs/architecture.md` §9
-risk 24.
-
-The first bring-up crashed during CUDA graph capture (`Triton Error [CUDA]: operation not
-permitted when stream is capturing`, inside the MLA decode kernel) — fixed with
-`--enforce-eager`, and the second bring-up reached `READY after 528s` cleanly. But real
-validation (a plain completion and a real tool-call request) found the engine unusable for
-this project: reasoning/content splitting is broken (the model's answer landed entirely in
-`reasoning` with `content: null` — the `kimi_k2` reasoning parser needs a literal `</think>`
-that this model doesn't reliably emit) and tool-calling is broken (a real `get_weather` call
-came back with scrambled special-token order and `tool_calls: null`). This matches a known,
-currently open, unresolved upstream bug specific to this model
-([MoonshotAI/Kimi-K2#100](https://github.com/MoonshotAI/Kimi-K2/issues/100)), not a config
-or stale-checkpoint problem (staged `tokenizer_config.json`/`chat_template.jinja` verified
-byte-identical to the current Hub copy). **Decision: deprioritized** — job cancelled, the
-two working models (`qwen3-32b`, `qwen3-coder-480b-awq`) remain the serving set;
-`config/models/kimi-k2-thinking.toml` is left ready to go for whenever an upstream fix
-lands. Full narrative: `docs/architecture.md` §9 risk 25.
-
-Also tried upgrading the container to `v0.28.0-cu129` (the latest vLLM release still built
-for our CUDA 12.x driver generation) specifically to see if a newer engine fixed this — it
-didn't. Identical garbled tool-call token order, identical `content: null` on plain
-completions, confirming this is a genuinely open upstream bug rather than something already
-fixed in a later release. Kept the upgrade anyway: real GPU sanity check passed
-(`torch.cuda` init + matmul on debug QoS) and both production models regression-tested clean
-on the new container (`qwen3-32b`, `qwen3-coder-480b-awq` — real completions and real
-tool-calls, both correct). The previous working container is kept on disk as
-`vllm-v0.27.1-cu129.sif.bak` for an instant rollback if needed. Full narrative:
-`docs/architecture.md` §9 risk 26.
+Adding a new model is a new `config/models/<name>.toml` (see existing ones for the shape:
+Slurm resources, tensor/pipeline parallelism, the tool-call and reasoning parsers vLLM
+needs for that specific model family) plus `mrctl stage` + `mrctl up`.
 
 ## Constraints worth remembering
 
 - **A100 is SM 8.0 — no FP8.** Never `--kv-cache-dtype fp8`. Native-FP8 checkpoints
   (DeepSeek-V3, Kimi K2) must be dequantized to BF16 or re-quantized to AWQ/GPTQ-INT4.
 - **Booster's driver is R535 (535.274.02) — CUDA 12.x generation only, no forward
-  compat to CUDA 13.** The default `vllm/vllm-openai` Docker tags moved to a CUDA 13.0
-  base (torch `+cu130`); that fails at engine init with `driver on your system is too
-  old (found version 12020)`. Always build from a `-cu12x` tag (currently
-  `v0.27.1-cu129`, set as the default in `scripts/build-container.sh`) — verified with
-  a real `torch.cuda.init()` + matmul on `boost_qos_dbg` before trusting it in a job.
+  compat to CUDA 13.** Always build the container from a `-cu12x` image tag (see
+  `scripts/build-container.sh`'s default) — verified with a real `torch.cuda.init()` +
+  matmul on `boost_qos_dbg` before trusting any new tag in a real job.
 - **No node-local disk.** `/tmp` is a 10 GB tmpfs. Weights come off Lustre every start.
 - **`$HOME` is a 50 GB quota** and writes fail *silently* when it is full. Every cache
   (`HF_HOME`, `TRITON_CACHE_DIR`, `VLLM_CACHE_ROOT`, Singularity's) is redirected to
   `$MR_STATE`. Keep it that way.
-- **Login → compute works on any port** (verified, 0.1 ms). No SSH tunnels internally.
+- **Compute nodes have no internet access; login nodes are not internet-reachable.**
+  Staging and container builds run on login nodes; client access goes through an SSH
+  tunnel to the gateway, not a public endpoint.
 - **Login-node processes get `RLIMIT_CPU=600s` soft** (hard is unlimited). Anything
   long-running or CPU-heavy there must raise it or it dies at 10 CPU-minutes with a
-  confusing error — this already killed `mksquashfs` during a container build. Raised in
-  `scripts/build-container.sh`, `mr.supervisor.run`, `mr.gateway.run`. Add it to anything
-  new you put on a login node.
-- **`cin_staff` is a shared allocation.** A 2-node backend burns ~192 node-hours per 4-day
+  confusing error. Already handled in `scripts/build-container.sh`, `mr.supervisor.run`,
+  and `mr.gateway.run` — add it to anything new placed on a login node.
+- **The Slurm allocation is shared.** A 2-node backend burns real node-hours per multi-day
   job. Idle reaping is on by default — an idle model sitting on 8 A100s is antisocial even
   when the budget allows it.

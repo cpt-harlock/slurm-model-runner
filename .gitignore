@@ -3,3 +3,7 @@ __pycache__/
 
 # Personal/machine-specific Claude Code settings, not shared config.
 .claude/settings.local.json
+
+# Working dev log (job IDs, timings, bug-by-bug narrative) -- not project
+# documentation. See docs/architecture.md for what's actually committed.
+NOTES.md
