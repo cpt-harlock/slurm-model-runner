@@ -688,3 +688,49 @@ fails.
     disk (~10 GB, trivial against `$SCRATCH`'s multi-petabyte headroom) as an immediate rollback
     path if a regression surfaces later under real production load that this smoke test didn't
     catch.
+
+---
+
+## 10. Portability to other Slurm clusters
+
+Everything above was designed and validated against Leonardo specifically, but the core
+architecture — file-based registry on a shared filesystem, a stateless reconcile loop, a
+gateway that renders live backend state into client-facing config, `ray symmetric-run` for
+multi-node vLLM — has nothing Leonardo-specific baked into its logic. Porting to a different
+Slurm cluster looks like mostly a config exercise, with two real exceptions.
+
+**Config-only, already parameterized — just swap values:**
+
+- Slurm `account`/`partition`/`qos`/`time` per model (`config/models/*.toml` `[slurm]`).
+- Filesystem tiers (`MR_ROOT`, `MR_STATE`, `MR_WEIGHTS` env vars, §Setup) — already
+  indirected, just point them at the target cluster's equivalent of `$WORK`/`$SCRATCH`/`$FAST`.
+- Container CUDA/driver generation (`scripts/build-container.sh`'s default tag) — re-derive
+  §1's driver-version check against the new cluster's actual driver, then pick the matching
+  `-cu12x`/`-cu13x` tag the same way risk 7 documents.
+
+**Already portable, not a risk despite looking site-specific:**
+
+- **No `--fakeroot`** (§9 risk 18): the writable-sandbox container build doesn't assume
+  `--fakeroot` is available or unavailable — it works either way, so this needed no
+  Leonardo-specific handling to begin with.
+- **`RLIMIT_CPU=600s` on login nodes** (§9 risk 3): `ulimit -t unlimited` is harmless to keep
+  even on a cluster with no such limit. No portability action needed; the calls in
+  `scripts/build-container.sh`, `mr.supervisor.run`, and `mr.gateway.run` can stay as-is.
+
+**Needs real verification, not just a value swap:**
+
+- **`NCCL_IB_HCA` pinning** (`vllm-server.sbatch`) names Leonardo's actual InfiniBand device
+  IDs (`mlx5_1`, `mlx5_4`, per §1's measured interconnect). A different cluster's HCA naming
+  is a hardware fact to re-measure, not a config default to copy.
+- **`lfs setstripe -c 16 -S 4M`** (§6) is a Lustre-specific striping command. A target cluster
+  on a different parallel filesystem (GPFS, WEKA, etc.) needs that filesystem's own
+  equivalent tuning step, or none at all if it doesn't expose per-directory striping.
+
+**The one structural assumption, not a config value:** §1's finding that "login nodes reach
+compute nodes directly on any port" is load-bearing for the whole design — the gateway talks
+to backends over plain HTTP with no tunnel, and the registry assumes compute jobs can be
+addressed by hostname:port from a login node. If a target cluster firewalls that off (common
+at sites with tighter network segmentation than Leonardo's), this is not a value to swap but
+a real redesign: the gateway would need an SSH-tunnel or relay layer between itself and each
+backend. Confirm this reachability assumption against the target cluster *before* porting
+anything else — it decides whether this is a weekend refactor or a bigger rework.
