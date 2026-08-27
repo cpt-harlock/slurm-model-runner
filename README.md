@@ -33,6 +33,7 @@ limitations, including the Kimi blocker.
 
 ```
 config/models/*.toml   per-model config (Slurm resources + engine flags)
+examples/avante.lua    Avante.nvim plugin spec wired to the gateway
 slurm/                 sbatch template: Singularity + Ray + vLLM + registry heartbeat
 scripts/               login-node staging: container build, weight download
 src/mr/
@@ -87,6 +88,10 @@ ssh -L 4000:localhost:4000 <user>@login.leonardo.cineca.it
 export ANTHROPIC_BASE_URL=http://127.0.0.1:4000   # Claude Code
 export OPENAI_BASE_URL=http://127.0.0.1:4000/v1   # Avante.nvim / any OpenAI-compatible client
 ```
+
+For Avante.nvim specifically, see **[examples/avante.lua](examples/avante.lua)** — a full
+lazy.nvim plugin spec wiring it to the gateway (no API key needed, cold-start-aware timeout,
+one provider per model).
 
 Adding a new model is a new `config/models/<name>.toml` (see existing ones for the shape:
 Slurm resources, tensor/pipeline parallelism, the tool-call and reasoning parsers vLLM
