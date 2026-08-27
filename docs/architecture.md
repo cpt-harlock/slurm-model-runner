@@ -213,10 +213,15 @@ export ANTHROPIC_SMALL_FAST_MODEL=qwen3-32b
 
 **Avante.nvim** uses the OpenAI-compatible provider against `http://127.0.0.1:8080/v1`.
 
-**Tool calling is mandatory, not optional.** Claude Code is close to useless without it. vLLM
-needs `--enable-auto-tool-choice --tool-call-parser hermes` (Qwen family). Validate tool calls
-in Phase 2 before declaring the endpoint usable — this is the most common way a self-hosted
-Claude Code setup silently fails.
+**Tool calling is mandatory, not optional.** Claude Code is close to useless without it. Every
+model needs `--enable-auto-tool-choice` plus a `--tool-call-parser` — **but which parser is
+per-model-family, not per-vendor** (§9 risk 21): `hermes` for `qwen3-32b`, `qwen3_coder` for
+`qwen3-coder-480b-awq` (a sibling Qwen model that emits tool calls in a different XML shape —
+`hermes` silently returned raw unparsed text for it instead of erroring), `kimi_k2` for
+Kimi-K2-Thinking. Check the container's actual tool-parser registry
+(`vllm/tool_parsers/__init__.py`) against what the model really emits before declaring tool
+calling functional — this is the most common way a self-hosted Claude Code setup silently
+fails.
 
 ---
 
@@ -462,8 +467,9 @@ Claude Code setup silently fails.
     on every node) rather than an inline `srun ... $SING ray ...` command, which also sidesteps
     nested-quoting hell across srun/bash/singularity/ray/vllm.
 
-    To validate the mechanism itself without a large new download: `config/models/
-    qwen3-32b-4n.toml` deliberately over-provisions the already-staged Qwen3-32B (TP=4, PP=4,
+    To validate the mechanism itself without a large new download: a temporary
+    `config/models/qwen3-32b-4n.toml` (since deleted, once a real multi-node model was
+    running) deliberately over-provisioned the already-staged Qwen3-32B (TP=4, PP=4,
     4 nodes) purely to exercise `ray symmetric-run` + cross-node NCCL/IB + PP end to end. The
     real flagship (Qwen3-Coder-480B-A35B, ~960 GB BF16 per §5) does not currently fit in
     `$FAST`'s 1 TB quota alongside the existing Qwen3-32B weights (939 GB free) -- serving it
