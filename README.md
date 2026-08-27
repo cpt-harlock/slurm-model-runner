@@ -92,6 +92,29 @@ Adding a new model is a new `config/models/<name>.toml` (see existing ones for t
 Slurm resources, tensor/pipeline parallelism, the tool-call and reasoning parsers vLLM
 needs for that specific model family) plus `mrctl stage` + `mrctl up`.
 
+## Porting to another Slurm cluster
+
+Nothing about the core design — the file-based registry, the reconcile loop, the gateway
+rendering live backend state into client config — is Leonardo-specific. Porting elsewhere
+is mostly a config exercise:
+
+- Set the Slurm `account`/`partition`/`qos`/`time` in each `config/models/*.toml` to the
+  target cluster's own values.
+- Point `MR_ROOT`/`MR_STATE`/`MR_WEIGHTS` at that cluster's filesystem tiers.
+- Re-derive the container's CUDA/driver tag (`scripts/build-container.sh`'s default)
+  against the target cluster's actual driver version, the same way Leonardo's was pinned.
+
+Two things need re-verifying against the new hardware/filesystem rather than a value swap:
+the `NCCL_IB_HCA` device names in `slurm/vllm-server.sbatch` (Leonardo's actual InfiniBand
+HCA IDs) and the `lfs setstripe` staging step (Lustre-specific — a different parallel
+filesystem needs its own equivalent, or none).
+
+The one assumption worth confirming *before* anything else: the gateway talks to compute
+backends over plain HTTP with no tunnel, which only works because Leonardo's login nodes
+reach compute nodes directly on any port. A cluster with tighter network segmentation would
+need a tunnel/relay layer between the gateway and each backend — a real design change, not
+a config edit. Full breakdown: **[docs/architecture.md §10](docs/architecture.md#10-portability-to-other-slurm-clusters)**.
+
 ## Constraints worth remembering
 
 - **A100 is SM 8.0 — no FP8.** Never `--kv-cache-dtype fp8`. Native-FP8 checkpoints
