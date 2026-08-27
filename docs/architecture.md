@@ -689,6 +689,36 @@ fails.
     path if a regression surfaces later under real production load that this smoke test didn't
     catch.
 
+27. **Staging `deepseek-v3.1-terminus` hit a reproducible `httpx`/brotli decoder crash on one
+    small file, not the large shards.** `mrctl stage` pulled all 72 safetensors shards cleanly
+    (359,176,371,416 bytes on disk vs. `model.safetensors.index.json`'s declared
+    `total_size: 359,159,737,856` -- the small delta is safetensors header overhead, not a
+    mismatch) but crashed partway through the metadata files with
+    `httpx.DecodingError: brotli: decoder process called with data when
+    'can_accept_more_data()' is False`. `mrctl models` still reported `[staged]` throughout --
+    that check is directory-existence only (`cli.py`'s `cmd_models`), not a completeness
+    check, so it can't be trusted alone after a crashed download; verify shard count and
+    byte-sum against the index's `weight_map`/`total_size` instead.
+
+    The missing file was `tokenizer.json` (confirmed against the Hub's own file tree). Retried
+    `mrctl stage` twice -- same crash, same file, both times: this is a reproducible interaction
+    between this repo's specific brotli-compressed response for that file and the installed
+    `httpx`/`brotlicffi` versions, not a transient network blip (unlike risk-pattern precedent
+    elsewhere in this doc, e.g. the post-build Lustre I/O error, which *did* clear on a bare
+    retry). Worked around by fetching that one file directly with `curl -H "Accept-Encoding:
+    identity"` (forcing uncompressed transfer, sidestepping the brotli path entirely) and moving
+    it into place -- validated as parseable JSON and byte-identical in size to the Hub's listing
+    before trusting it.
+
+    One trap worth flagging for next time: re-running `mrctl stage` *after* manually placing the
+    file re-deleted it. `huggingface_hub`'s local-dir download tracks its own
+    etag/metadata cache under `.cache/huggingface/`, doesn't recognize a manually-dropped file as
+    already-downloaded, and re-attempts it -- hitting the same brotli crash again and leaving the
+    file gone rather than restored. Confirmed `mrctl up` and the sbatch template never re-invoke
+    staging, so this is a one-time hazard during initial staging, not a risk on every job
+    submission -- but if `mrctl stage` is ever re-run by hand after a manual file fix like this,
+    the fix needs reapplying afterward, not before.
+
 ---
 
 ## 10. Portability to other Slurm clusters
