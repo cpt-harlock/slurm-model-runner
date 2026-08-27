@@ -1,0 +1,76 @@
+# Third serving-set candidate, chosen the same way Kimi-K2-Thinking was (§9 risk 24):
+# checked the Hugging Face API directly rather than assuming from memory. deepseek-ai's
+# newest releases (DeepSeek-V4-Pro/Flash, Aug 2026) are natively FP8 and use a brand-new
+# `DeepseekV4ForCausalLM` class with no confirmed vLLM support or community INT4
+# quantization yet -- too much unverified risk. DeepSeek-V3.2 uses a newer `DeepseekV32`
+# sparse-attention architecture with an open, actively-discussed vLLM bug where tool-call
+# tags leak into content instead of parsing (worse risk profile than what we're picking).
+#
+# DeepSeek-V3.1-Terminus instead: `DeepseekV3ForCausalLM`, the *same* architecture class
+# as Kimi-K2-Thinking, which already proved out at the engine level in this exact
+# container (Kimi's bring-up reached READY -- only its tool/reasoning parsing was broken,
+# which is a separate, model-specific concern, not an engine/architecture one).
+#
+# Checkpoint: INC4AI/DeepSeek-V3.1-Terminus-int4-mixed-AutoRound (~359 GB, 72 shards,
+# verified via the HF tree API, not the API's unreliable `safetensors.total` field which
+# undercounts this repo). Weight-only INT4 (Intel AutoRound, GPTQ-compatible packing,
+# `packing_format: auto_round:auto_gptq`, group_size 128, non-expert layers kept at 8-bit)
+# -- no quantized activations, so this is the Marlin/GPTQ-on-Ampere path already proven
+# safe in this project (qwen3-coder-480b-awq), not the FP8-tensor-core wall A100 lacks.
+# A second candidate, adlik/DeepSeek-V3.1-Terminus-AWQ-W4AFP8, was ruled out specifically
+# because its activations are dynamic FP8 (`input_activations.type: float, num_bits: 8`)
+# -- same no-native-FP8-on-Ampere problem as a native checkpoint, just partially quantized.
+#
+# $FAST storage: staging this needed freeing space first -- Kimi-K2-Thinking's 554 GB was
+# deleted (already unusable pending its own upstream bug, §9 risk 25/26) to bring $FAST
+# from 860/1000 GB used down to ~306 GB, leaving comfortable room for this ~359 GB checkpoint.
+name = "deepseek-v3.1-terminus"
+hf_repo = "INC4AI/DeepSeek-V3.1-Terminus-int4-mixed-AutoRound"
+
+idle_timeout_s = 1800
+# No measured load time yet -- placeholder until a real bring-up measures it, same pattern
+# as every other model's first config (see README's Phase 0 section).
+handoff_lead_s = 3600
+
+[slurm]
+account = "cin_staff"
+partition = "boost_usr_prod"
+qos = "boost_qos_lprod"       # 4 days, <=8 nodes / 32 GPUs
+nodes = 2
+time = "4-00:00:00"
+cpus_per_task = 32
+gpus_per_node = 4
+
+[engine]
+tensor_parallel_size = 4      # TP within each node, over NVLink
+pipeline_parallel_size = 2    # PP across the 2 nodes, over IB -- same topology already
+                               # proven for qwen3-coder-480b-awq (TP4xPP2, 8 GPUs)
+# Starting conservative, same reasoning as every other multi-node model here: raise once
+# a real bring-up confirms the KV budget rather than guessing at the checkpoint's native
+# ceiling (163840 per config.json).
+max_model_len = 32768
+gpu_memory_utilization = 0.85 # conservative starting point; no measured
+                               # --kv-cache-memory-bytes exists yet for this
+                               # checkpoint/topology (§9 risk 9). Note: DeepSeek's MLA
+                               # (multi-head latent attention) keeps per-token KV cache
+                               # much smaller than a standard GQA model of this size, so
+                               # the ~359 GB weight footprint leaving only ~30% of 2 nodes'
+                               # 512 GB HBM for KV cache should still be workable -- but
+                               # this is exactly the kind of assumption risk 9 says to
+                               # verify on a real bring-up, not trust in advance.
+#
+# --tool-call-parser deepseek_v31 / --reasoning-parser deepseek_r1: checked directly
+# against this model's own chat template before ever bringing it up (same lesson as risk
+# 21/24) -- it uses DeepSeek-specific tokens (<|tool_calls_begin|><|tool_call_begin|>NAME
+# <|tool_sep|>ARGS<|tool_call_end|>...<|tool_calls_end|>) for tool calls and <think>...
+# </think> for reasoning, none of which match hermes/qwen3_coder/kimi_k2. vLLM registers
+# dedicated parsers for both, actively discussed and used for exactly this model (not a
+# guess, and not the same parser Kimi's config assumed and turned out broken for). Known
+# caveat to test explicitly on first bring-up: an open vLLM issue reports leading-
+# whitespace accumulation in *multi-turn* tool-calling conversations specifically for this
+# parser -- narrower than Kimi's total breakage, but worth a real multi-turn test, not just
+# a single tool-call check, before declaring this model's tool calling fully functional.
+extra_args = [
+  "--enable-auto-tool-choice", "--tool-call-parser", "deepseek_v31",
+  "--reasoning-parser", "deepseek_r1",
+]
