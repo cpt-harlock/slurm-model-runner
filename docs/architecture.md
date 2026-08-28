@@ -234,7 +234,7 @@ fails.
 | **2** | LiteLLM gateway + client wiring | Claude Code completes a real **tool-using** task against the cluster — **done: the actual `claude` CLI (`--bare -p`, `ANTHROPIC_BASE_URL` pointed at the gateway) used its own `Read` tool to fetch a file's real contents end-to-end through vLLM (§9 risks 8, 10–12)** |
 | **3** | `mr.supervisor`: rolling handoff + idle reaping | Service survives a walltime expiry with no failed request — **in progress: drain state machine + activity-based idle reaping implemented and unit-tested (`tests/test_supervisor.py`); live-verified a full idle-reap-and-relaunch cycle (§9 risk 13); caught/fixed a real duplicate-launch bug on cold start (§9 risk 14); caught/fixed a schema-forward-compat bug that made a live gateway silently drop a healthy backend (§9 risk 15); live-verified the full drain cycle itself when two backends briefly went READY together -- `start_drain` fired, then the incumbent was cancelled within one tick once `refresh_activity()` saw its in-flight count reach zero, ending in exactly one healthy backend. The only piece still unverified live is *why* a second backend goes READY in the first place via the walltime path specifically (`launch_successor` firing because a job's wall is running out, rather than a manual `mrctl up`) -- that needs a job to actually approach its multi-day wall, which isn't practical to wait out; that trigger condition is covered by the unit tests instead** |
 | **4** | Multi-node via `ray symmetric-run`; flagship model; NCCL/IB tuning | 4+ nodes stable under load — **mechanism done: job 54343864, Qwen3-32B deliberately spread TP4/PP4 across 4 real nodes (16 GPUs), `READY after 167s`, 10/10 concurrent requests succeeded (§9 risk 18). Flagship model itself (Qwen3-Coder-480B) not yet attempted — needs more `$FAST` storage or the AWQ-INT4 conversion; NCCL/IB tuning beyond the existing pinned HCAs is untouched, nothing so far has needed it** |
-| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — **multi-model routing: done for real, live-verified end to end.** `qwen3-coder-480b-awq` (community AWQ-INT4, ~262 GB) staged, brought up (TP4×PP2, 8 GPUs, `READY after 348s` on the tool-call-fixed run), and now serves Claude Code's real `sonnet` alias through the full stack: real CLI -> gateway -> flagship -> real `Read` tool use -> correct answer. Along the way: fixed a routing bug before it shipped (explicit per-model `role`, §9 risk 20), fixed tool calling that silently returned raw unparsed text instead of structured calls (`qwen3_coder` parser, not `hermes` -- §9 risk 21), and hit the exact stale-long-lived-gateway hazard risk 15 warned about, just failing silently instead of loudly this time (§9 risk 22). Both models run concurrently; Avante.nvim wired up as a second real client (`~/.config/nvim/lua/plugins/avante.lua`). **Queue-aware UX: done** (§9 risk 23) -- the waker's ETA is now real Slurm/registry state, not a fixed guess. **K2-class: attempted, deprioritized** -- `moonshotai/Kimi-K2-Thinking` (594 GB, natively INT4, no conversion pipeline needed after all -- see §9 risk 24) staged and brought up successfully (`READY after 528s` once `--enforce-eager` worked around a real CUDA-graph/Triton crash), but real tool-call and reasoning validation found both broken by an open, unresolved upstream vLLM/Kimi bug (§9 risk 25) -- job cancelled, deprioritized until upstream fixes land. Metrics not started |
+| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — **multi-model routing: done for real, live-verified end to end.** `qwen3-coder-480b-awq` (community AWQ-INT4, ~262 GB) staged, brought up (TP4×PP2, 8 GPUs, `READY after 348s` on the tool-call-fixed run), and now serves Claude Code's real `sonnet` alias through the full stack: real CLI -> gateway -> flagship -> real `Read` tool use -> correct answer. Along the way: fixed a routing bug before it shipped (explicit per-model `role`, §9 risk 20), fixed tool calling that silently returned raw unparsed text instead of structured calls (`qwen3_coder` parser, not `hermes` -- §9 risk 21), and hit the exact stale-long-lived-gateway hazard risk 15 warned about, just failing silently instead of loudly this time (§9 risk 22). Both models run concurrently; Avante.nvim wired up as a second real client (`~/.config/nvim/lua/plugins/avante.lua`). **Queue-aware UX: done** (§9 risk 23) -- the waker's ETA is now real Slurm/registry state, not a fixed guess. **K2-class: attempted, deprioritized** -- `moonshotai/Kimi-K2-Thinking` (594 GB, natively INT4, no conversion pipeline needed after all -- see §9 risk 24) staged and brought up successfully (`READY after 528s` once `--enforce-eager` worked around a real CUDA-graph/Triton crash), but real tool-call and reasoning validation found both broken by an open, unresolved upstream vLLM/Kimi bug (§9 risk 25) -- job cancelled, deprioritized until upstream fixes land; a v0.28.0 vLLM upgrade tried specifically to fix this did not (§9 risk 26). **Third serving-set candidate, DeepSeek-V3.1-Terminus: staged and running, deprioritized as primary.** Hit the same CUDA-graph/Triton crash as Kimi on first bring-up (same MLA architecture, same `--enforce-eager` fix -- §9 risk 28); its reasoning/content-splitting bug was genuinely fixed for real (a new `chat_template_kwargs` mechanism, not a workaround), but tool-calling under `tool_choice: auto` remains unreliable (works only under `required`) -- kept running as a manually-addressable option, not routed to any Claude Code alias. Along the way, a real Avante session hit the flagship's `max_model_len` ceiling live and exposed a real double-counting bug in the gateway's rendered client config -- both fixed: `max_model_len` raised 65536 -> 131072 (KV-headroom-justified, real-bring-up-verified), and `mr.gateway.render()`'s `max_input_tokens`/`max_output_tokens` split corrected (§9 risk 29). Metrics not started |
 
 ---
 
@@ -718,6 +718,112 @@ fails.
     staging, so this is a one-time hazard during initial staging, not a risk on every job
     submission -- but if `mrctl stage` is ever re-run by hand after a manual file fix like this,
     the fix needs reapplying afterward, not before.
+28. **DeepSeek-V3.1-Terminus's first real bring-up hit the identical CUDA-graph/Triton MLA
+    crash as Kimi-K2-Thinking (risk 25) -- same fix, and this confirms it's a systemic
+    engine-level issue, not a per-checkpoint one.** Job 54705830 (TP4xPP2, no
+    `--enforce-eager`) died with the exact same `Triton Error [CUDA]: operation not permitted
+    when stream is capturing` inside `triton_mla.py`'s decode kernel during CUDA graph
+    capture, cascading to `EngineCore failed to start`. Both models share the
+    `DeepseekV3ForCausalLM`/MLA architecture, which is now the common factor across two
+    independent crashes with byte-identical stack traces -- strong evidence this is a
+    vLLM-v0.28.0 x MLA-architecture bug, not something tied to either model's specific
+    weights or tokenizer. Fixed the same way: added `--enforce-eager` to
+    `config/models/deepseek-v3.1-terminus.toml`, resubmitted (job 54706174), `READY after
+    317s`, no crash.
+
+    Real validation (the same rigor as every other model) then found two more issues, of
+    different severity:
+
+    - **Reasoning/content splitting was broken, but this one had a real, permanent fix.**
+      A plain completion came back with the correct final answer -- but entirely inside
+      `reasoning`, `content: null`, `finish_reason: "stop"` (not truncation), 0
+      `reasoning_tokens` per the API's own usage accounting. Root-caused by reading both
+      sides: vLLM's `BaseThinkingReasoningParser.extract_reasoning` (the shared base class
+      `deepseek_r1`'s parser inherits) falls back to "assume everything is reasoning" when
+      no `</think>` appears in the *generated* output; and the checkpoint's own
+      `chat_template.jinja` defaults `thinking=false`, which at the generation-prompt
+      boundary inserts a literal `</think>` into the *prompt itself*
+      (`{% if not thinking %}{{'</think>'}}{% else %}{{'<think>'}}{% endif %}`) rather than
+      leaving it for the model to generate. So the closing tag exists, but in a part of the
+      exchange the parser never inspects -- the model's own generated tokens never contain
+      one, and the parser's documented fallback (correct behavior for models that never
+      close their think block, not a bug in isolation) makes it dump the whole output into
+      `reasoning`.
+
+      Confirmed the fix directly against vLLM first (`chat_template_kwargs: {"thinking":
+      true}` in the request body: clean `content` split, real reasoning preserved), then
+      built it as a permanent, no-client-effort-required fix rather than a one-off
+      workaround: added `ModelSpec.chat_template_kwargs` (`config.py`, a `dict`, default
+      empty) and wired it into `mr.gateway.render()`'s rendered `litellm_params` for any
+      model that sets it, forwarded straight through `hosted_vllm/` into every request's
+      body regardless of client. Verified end-to-end through the real gateway (port 4000,
+      not a direct vLLM call) with a client that passed nothing special: correct `content`
+      split, confirming LiteLLM actually forwards the config-level key rather than
+      silently dropping it despite `drop_params: true`.
+
+    - **Tool-calling under `tool_choice: auto` is unreliable -- a real, unresolved problem,
+      not a parser bug.** The config's own pre-bring-up research (§9, this file, this
+      model's own comment block) had already flagged an open vLLM issue about
+      leading-whitespace accumulation in *multi-turn* tool-calling for the `deepseek_v31`
+      parser -- what was found live is different and more basic: under `tool_choice: auto`
+      (what real clients, including Claude Code, actually use -- not `required`), a real
+      `get_weather` request came back with `tool_calls: null` and a *fabricated apology*
+      ("I'm unable to retrieve real-time weather information...") as `content`, 3/3
+      reproducible runs. Inspecting `DeepSeekV31ToolParser.extract_tool_calls`
+      (`vllm/tool_parsers/deepseekv31_tool_parser.py`) confirmed the parser itself is
+      working exactly as designed: it looks for a literal `<｜tool▁calls▁begin｜>` token in
+      the output and falls through to plain content if it's absent -- correct, defensive
+      behavior. The real finding is upstream of the parser: the model's own
+      `reasoning_content` for the *same failing request* explicitly narrated the correct
+      decision ("I need to use the available tool... I'll call it with Rome as the location
+      parameter") and then never actually emitted the tool-call token sequence in its
+      generated output -- a genuine say/do inconsistency in the model's own generation, not
+      a parsing or config defect. Confirmed the parser and prompt scaffolding both work
+      correctly when the decision is forced (`tool_choice: "required"`): proper
+      `tool_calls` array, correct arguments, `finish_reason: "tool_calls"`, every time.
+
+    **Decision (with the user): keep it running, but deprioritized -- not routed to Claude
+    Code's sonnet/opus/haiku aliases.** No `role` is set in
+    `config/models/deepseek-v3.1-terminus.toml` (unlike `qwen3-coder-480b-awq`'s `role =
+    "primary"` and `qwen3-32b`'s `role = "small"`), so `mr.gateway.render()`'s existing
+    role-based selection already excludes it from every alias automatically -- no code
+    change was needed to enforce this, the architecture already does the right thing when a
+    model simply doesn't opt in. It stays up as a third, manually-addressable option
+    (`model: deepseek-v3.1-terminus` directly, with `tool_choice: required` when tool use is
+    needed) rather than being torn down like Kimi was, since its core defect (reasoning/
+    content) is now genuinely fixed and only the auto-tool-choice path remains unreliable.
+29. **A real Avante session hit `qwen3-coder-480b-awq`'s `max_model_len=65536` ceiling live,
+    and exposed a real double-counting bug in the gateway's rendered client config on top of
+    it.** The error surfaced in Avante as `litellm.ContextWindowExceededError`: a real
+    coding-session prompt reached 57,345 input tokens and requested 8,192 output tokens,
+    summing to 65,537 -- one token over the model's actual `--max-model-len` (a combined
+    prompt+completion budget, which vLLM correctly rejected with a 400).
+
+    Investigating why LiteLLM's own model_info hadn't caught this sooner turned up a second,
+    independent bug in `mr.gateway.render()`: `max_input_tokens` was rendered as the model's
+    *full* `max_model_len`, while `max_output_tokens` was rendered as a quarter of it *on
+    top* -- double-counting a budget vLLM enforces as one combined ceiling, not two separate
+    ones. Fixed in `gateway.py`: `max_input_tokens = max_len - max_output_tokens`, so the
+    two numbers now actually sum to the real limit (verified in the rendered
+    `litellm.config.yaml`: `deepseek-v3.1-terminus`'s `max_input_tokens` changed from `32768`
+    to the correct `24576` = `32768 - 8192`). This alone doesn't prevent an oversized prompt
+    from reaching vLLM (LiteLLM can't truncate an arbitrary conversation), but it stops the
+    advertised numbers from being actively wrong.
+
+    The actual fix for the live failure was raising `qwen3-coder-480b-awq`'s
+    `max_model_len` from 65536 to 131072 -- justified by the KV-cache headroom already
+    measured on first bring-up (9.14x concurrency at 65536 in the pinned 598,784-token KV
+    pool; 131072 keeps 4.57x, still comfortable) and picked over jumping straight to the
+    checkpoint's native 262144 ceiling (~2.28x headroom, still positive, but more
+    conservative on CUDA-graph capture memory growth for a model that -- unlike the
+    DeepseekV3-family MLA models -- does not run with `--enforce-eager`, so graph-capture
+    buffer sizing was a real unknown, not assumed safe from the KV math alone). Verified via
+    a real bring-up (`READY after 406s`, no OOM, no capture failure) before trusting it, then
+    proved the actual fix rather than just the absence of a crash: reproduced the exact
+    failure shape with a real 70,027-token prompt requesting 8,192 output tokens
+    (prompt+requested totaling 78,219 -- would have 400'd under the old 65536 cap by nearly
+    13K tokens) and confirmed it now completes cleanly, plus a standard tool-call regression
+    check to confirm nothing else broke on the restart.
 
 ---
 

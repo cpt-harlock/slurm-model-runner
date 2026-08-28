@@ -22,12 +22,13 @@ build-out, and a running log of concrete issues hit and how they were fixed.
 | Model | Role | Nodes | Status |
 |---|---|---|---|
 | `qwen3-32b` | fast/small | 1 | serving |
-| `qwen3-coder-480b-awq` | primary (flagship) | 2 | serving |
+| `qwen3-coder-480b-awq` | primary (flagship) | 2 | serving, `max_model_len=131072` |
+| `deepseek-v3.1-terminus` | — | 2 | serving, not aliased — reliable tool-calling needs `tool_choice: required` |
 | `kimi-k2-thinking` | — | 4 | staged, blocked on an upstream vLLM/tool-parser bug |
 
-Both serving models are lazy-wake: idle backends are reaped automatically and cold-started
+All serving models are lazy-wake: idle backends are reaped automatically and cold-started
 again on the next request. See `docs/architecture.md` §9 for open risks and known
-limitations, including the Kimi blocker.
+limitations, including the Kimi blocker and DeepSeek's `tool_choice: auto` unreliability.
 
 ## Layout
 

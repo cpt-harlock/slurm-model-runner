@@ -32,6 +32,16 @@ idle_timeout_s = 1800
 # as every other model's first config (see README's Phase 0 section).
 handoff_lead_s = 3600
 
+# Without this, the chat template's default (thinking=false) bakes a literal
+# "</think>" into the *prompt* instead of the generated output, so vLLM's
+# reasoning parser never finds a closing tag to split on and dumps the whole
+# answer into `reasoning` with content: null for every single request --
+# confirmed live (see config.py's ModelSpec.chat_template_kwargs docstring
+# for the full mechanism). Rendered into every client's request by
+# mr.gateway automatically; no client needs to know about this.
+[chat_template_kwargs]
+thinking = true
+
 [slurm]
 account = "cin_staff"
 partition = "boost_usr_prod"
@@ -70,7 +80,19 @@ gpu_memory_utilization = 0.85 # conservative starting point; no measured
 # whitespace accumulation in *multi-turn* tool-calling conversations specifically for this
 # parser -- narrower than Kimi's total breakage, but worth a real multi-turn test, not just
 # a single tool-call check, before declaring this model's tool calling fully functional.
+#
+# --enforce-eager: first real bring-up (job 54705830) crashed during CUDA graph
+# capture: "Triton Error [CUDA]: operation not permitted when stream is capturing",
+# inside the same MLA decode-attention Triton kernel
+# (vllm/v1/attention/backends/mla/triton_mla.py -> decode_attention_fwd_grouped) that
+# hit the identical bug on Kimi-K2-Thinking's first attempt (architecture.md §9 risk
+# 25) -- same root cause (a Triton kernel's first JIT compile happening mid-CUDA-graph-
+# capture, which CUDA graphs don't tolerate), same fix. Disables CUDA graph capture
+# entirely (real decode-throughput cost, accepted to get a working deployment); this
+# looks like a systemic DeepseekV3ForCausalLM/MLA-architecture issue in this vLLM
+# version rather than something specific to either checkpoint.
 extra_args = [
   "--enable-auto-tool-choice", "--tool-call-parser", "deepseek_v31",
   "--reasoning-parser", "deepseek_r1",
+  "--enforce-eager",
 ]

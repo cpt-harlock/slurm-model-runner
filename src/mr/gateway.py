@@ -70,7 +70,20 @@ def render(model_status: dict[str, registry.Backend | None]) -> str:
     # actually uses this. max_output_tokens is a quarter of the model's context
     # -- a generous completion budget while leaving room for a real prompt;
     # tune per-model if that ever binds.
+    #
+    # max_input_tokens must be max_len MINUS max_output_tokens, not max_len
+    # itself -- vLLM's max_model_len is a *combined* prompt+completion budget,
+    # not a separate per-side limit. Setting max_input_tokens to the full
+    # max_len (the original bug here) double-counts the budget: a real Avante
+    # session hit this live -- a 57,345-token prompt plus an 8,192-token
+    # request on qwen3-coder-480b-awq's old max_model_len=65536 summed to
+    # 65,537 and vLLM correctly 400'd, but LiteLLM's model_info had been
+    # advertising the full 65536 as available for input alone, which was
+    # never true. This alone doesn't guarantee no client can still send an
+    # oversized prompt (LiteLLM can't truncate an arbitrary conversation),
+    # but it stops the numbers from being actively wrong.
     max_len_by_model = {m: config.load(m).engine.max_model_len for m in model_status}
+    ctk_by_model = {m: config.load(m).chat_template_kwargs for m in model_status}
 
     def entry(model_name: str, served_name: str, url: str, backend_model: str) -> list[str]:
         max_len = max_len_by_model.get(backend_model)
@@ -83,11 +96,23 @@ def render(model_status: dict[str, registry.Backend | None]) -> str:
             f"      api_base: {url}/v1",
             "      api_key: none",
         ]
+        # Forwarded straight through hosted_vllm/ into the request body --
+        # see ModelSpec.chat_template_kwargs (config.py) for why
+        # deepseek-v3.1-terminus needs {"thinking": true} here to get correct
+        # reasoning/content splitting out of every client, not just ones that
+        # remember to pass it themselves.
+        ctk = ctk_by_model.get(backend_model)
+        if ctk:
+            lines.append("      chat_template_kwargs:")
+            for k, v in ctk.items():
+                yaml_v = str(v).lower() if isinstance(v, bool) else v
+                lines.append(f"        {k}: {yaml_v}")
         if max_len:
+            max_output = max_len // 4
             lines += [
                 "    model_info:",
-                f"      max_input_tokens: {max_len}",
-                f"      max_output_tokens: {max_len // 4}",
+                f"      max_input_tokens: {max_len - max_output}",
+                f"      max_output_tokens: {max_output}",
             ]
         return lines
 

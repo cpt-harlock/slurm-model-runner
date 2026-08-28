@@ -32,11 +32,24 @@ gpus_per_node = 4
 tensor_parallel_size = 4      # TP within each node, over NVLink
 pipeline_parallel_size = 2    # PP across the 2 nodes, over IB
 # Native max_position_embeddings is 262144 (262K) per the checkpoint's
-# config.json. Starting well below that: GQA (8 KV heads, head_dim 128) keeps
-# per-token KV cache small (~250 KB/token). Confirmed on first real bring-up
-# (job 54379904): 598,784 tokens of KV cache at this setting, 9.14x
-# concurrency headroom for 65536-token requests -- comfortable, not tight.
-max_model_len = 65536
+# config.json. Started conservative at 65536 (9.14x concurrency headroom in
+# the pinned 598,784-token KV pool at that setting) -- raised to 131072 after
+# a real Avante session hit the ceiling live: a 57,345-token prompt plus an
+# 8,192-token request summed to 65,537 against the old 65536 cap, and vLLM
+# correctly 400'd (litellm.ContextWindowExceededError). Also exposed a real
+# bug in mr.gateway.render()'s rendered model_info: max_input_tokens was set
+# to the *full* max_model_len while max_output_tokens was set to a quarter
+# of it *on top* -- double-counting a budget that vLLM enforces as
+# prompt+completion combined, not two separate ceilings (fixed in gateway.py,
+# architecture.md §9 risk 29). 131072 keeps 4.57x concurrency headroom in the
+# same pinned KV pool (598784/131072) -- picked over jumping straight to the
+# native 262144 ceiling (which would still fit, ~2.28x headroom) to stay
+# conservative on CUDA-graph capture memory, since this model (unlike the
+# DeepseekV3-family MLA models) does not run with --enforce-eager and doubling
+# max_model_len can grow graph-capture buffer requirements in ways the KV pool
+# math alone doesn't cover -- verified via a real bring-up before trusting it,
+# not assumed from the KV math alone.
+max_model_len = 131072
 gpu_memory_utilization = 0.85
 # --kv-cache-memory-bytes pins the KV cache pool explicitly, same lesson as
 # qwen3-32b.toml (architecture.md §9 risk 9): this value is specific to this

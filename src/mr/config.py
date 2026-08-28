@@ -79,6 +79,23 @@ class ModelSpec:
     # separate from handoff_lead_s, which is a derived scheduling margin, not
     # this raw number.
     measured_load_s: int = 0
+    # Static per-request params the gateway should inject into every LiteLLM
+    # call for this model (rendered into litellm_params, forwarded straight
+    # through hosted_vllm/ to the OpenAI-compatible request body). Exists for
+    # deepseek-v3.1-terminus's chat template: its default (thinking=false)
+    # bakes a literal "</think>" into the *prompt* itself rather than letting
+    # the model generate one, so vLLM's reasoning parser (which only inspects
+    # generated tokens) never sees a closing tag and dumps the entire answer
+    # into `reasoning` with content: null -- confirmed by inspecting
+    # vllm.reasoning.basic_parsers.BaseThinkingReasoningParser.extract_reasoning
+    # (falls back to "assume everything is reasoning" when no end token is
+    # found in the output) and the checkpoint's own chat_template.jinja
+    # (`{% if not thinking %}{{'</think>'}}{% else %}{{'<think>'}}{% endif %}`
+    # at the generation-prompt boundary). Passing {"thinking": true} here
+    # makes the template emit `<think>` instead, so the model's own
+    # </think> lands in its generated output where the parser can find it --
+    # confirmed live: content splits correctly, real reasoning preserved.
+    chat_template_kwargs: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.served_name = self.served_name or self.name
@@ -105,6 +122,7 @@ def load(name: str) -> ModelSpec:
         handoff_lead_s=raw.get("handoff_lead_s", 3600),
         role=raw.get("role", ""),
         measured_load_s=raw.get("measured_load_s", 0),
+        chat_template_kwargs=raw.get("chat_template_kwargs", {}),
         slurm=SlurmSpec(**raw.get("slurm", {})),
         engine=EngineSpec(**raw.get("engine", {})),
     )

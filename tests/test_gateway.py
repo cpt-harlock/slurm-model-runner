@@ -46,6 +46,42 @@ class RenderTest(unittest.TestCase):
             out = gateway.render({"qwen3-32b": None})
         self.assertIn(f"api_base: http://127.0.0.1:{gateway.WAKER_PORT}/qwen3-32b/v1", out)
 
+    def test_max_input_tokens_leaves_room_for_output(self):
+        # Regression test for a real bug (architecture.md §9 risk 29): rendering
+        # max_input_tokens as the *full* max_model_len while max_output_tokens
+        # was a quarter of it *on top* double-counted vLLM's combined
+        # prompt+completion budget. A real Avante session hit this live.
+        b = registry.Backend(model="qwen3-32b", served_name="qwen3-32b", job_id="1",
+                              state=registry.READY, host="lrdn1", port=8000)
+        with patch("mr.config.load") as load:
+            load.return_value.engine.max_model_len = 32768
+            load.return_value.chat_template_kwargs = {}
+            out = gateway.render({"qwen3-32b": b})
+        self.assertIn("max_input_tokens: 24576", out)
+        self.assertIn("max_output_tokens: 8192", out)
+
+    def test_chat_template_kwargs_rendered_when_set(self):
+        # deepseek-v3.1-terminus needs {"thinking": true} forwarded into every
+        # request or its reasoning parser dumps the whole answer into
+        # `reasoning` with content: null (architecture.md §9 risk 28).
+        b = registry.Backend(model="deepseek-v3.1-terminus", served_name="deepseek-v3.1-terminus",
+                              job_id="1", state=registry.READY, host="lrdn1", port=8000)
+        with patch("mr.config.load") as load:
+            load.return_value.engine.max_model_len = 32768
+            load.return_value.chat_template_kwargs = {"thinking": True}
+            out = gateway.render({"deepseek-v3.1-terminus": b})
+        self.assertIn("chat_template_kwargs:", out)
+        self.assertIn("thinking: true", out)
+
+    def test_no_chat_template_kwargs_block_when_unset(self):
+        b = registry.Backend(model="qwen3-32b", served_name="qwen3-32b", job_id="1",
+                              state=registry.READY, host="lrdn1", port=8000)
+        with patch("mr.config.load") as load:
+            load.return_value.engine.max_model_len = 32768
+            load.return_value.chat_template_kwargs = {}
+            out = gateway.render({"qwen3-32b": b})
+        self.assertNotIn("chat_template_kwargs:", out)
+
     def test_primary_role_wins_over_alphabetical_order(self):
         # "aaa-small" sorts first alphabetically; the old logic picked
         # models[0] as primary and matched "32b" in the name for small,
@@ -62,6 +98,7 @@ class RenderTest(unittest.TestCase):
             spec = type("Spec", (), {})()
             spec.engine = type("Engine", (), {"max_model_len": 32768})()
             spec.role = "small" if name == "aaa-small" else "primary"
+            spec.chat_template_kwargs = {}
             return spec
 
         with patch("mr.config.load", side_effect=fake_load):
