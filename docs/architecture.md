@@ -234,7 +234,7 @@ fails.
 | **2** | LiteLLM gateway + client wiring | Claude Code completes a real **tool-using** task against the cluster — **done: the actual `claude` CLI (`--bare -p`, `ANTHROPIC_BASE_URL` pointed at the gateway) used its own `Read` tool to fetch a file's real contents end-to-end through vLLM (§9 risks 8, 10–12)** |
 | **3** | `mr.supervisor`: rolling handoff + idle reaping | Service survives a walltime expiry with no failed request — **in progress: drain state machine + activity-based idle reaping implemented and unit-tested (`tests/test_supervisor.py`); live-verified a full idle-reap-and-relaunch cycle (§9 risk 13); caught/fixed a real duplicate-launch bug on cold start (§9 risk 14); caught/fixed a schema-forward-compat bug that made a live gateway silently drop a healthy backend (§9 risk 15); live-verified the full drain cycle itself when two backends briefly went READY together -- `start_drain` fired, then the incumbent was cancelled within one tick once `refresh_activity()` saw its in-flight count reach zero, ending in exactly one healthy backend. The only piece still unverified live is *why* a second backend goes READY in the first place via the walltime path specifically (`launch_successor` firing because a job's wall is running out, rather than a manual `mrctl up`) -- that needs a job to actually approach its multi-day wall, which isn't practical to wait out; that trigger condition is covered by the unit tests instead** |
 | **4** | Multi-node via `ray symmetric-run`; flagship model; NCCL/IB tuning | 4+ nodes stable under load — **mechanism done: job 54343864, Qwen3-32B deliberately spread TP4/PP4 across 4 real nodes (16 GPUs), `READY after 167s`, 10/10 concurrent requests succeeded (§9 risk 18). Flagship model itself (Qwen3-Coder-480B) not yet attempted — needs more `$FAST` storage or the AWQ-INT4 conversion; NCCL/IB tuning beyond the existing pinned HCAs is untouched, nothing so far has needed it** |
-| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — **multi-model routing: done for real, live-verified end to end.** `qwen3-coder-480b-awq` (community AWQ-INT4, ~262 GB) staged, brought up (TP4×PP2, 8 GPUs, `READY after 348s` on the tool-call-fixed run), and now serves Claude Code's real `sonnet` alias through the full stack: real CLI -> gateway -> flagship -> real `Read` tool use -> correct answer. Along the way: fixed a routing bug before it shipped (explicit per-model `role`, §9 risk 20), fixed tool calling that silently returned raw unparsed text instead of structured calls (`qwen3_coder` parser, not `hermes` -- §9 risk 21), and hit the exact stale-long-lived-gateway hazard risk 15 warned about, just failing silently instead of loudly this time (§9 risk 22). Both models run concurrently; Avante.nvim wired up as a second real client (`~/.config/nvim/lua/plugins/avante.lua`). **Queue-aware UX: done** (§9 risk 23) -- the waker's ETA is now real Slurm/registry state, not a fixed guess. **K2-class: attempted, deprioritized** -- `moonshotai/Kimi-K2-Thinking` (594 GB, natively INT4, no conversion pipeline needed after all -- see §9 risk 24) staged and brought up successfully (`READY after 528s` once `--enforce-eager` worked around a real CUDA-graph/Triton crash), but real tool-call and reasoning validation found both broken by an open, unresolved upstream vLLM/Kimi bug (§9 risk 25) -- job cancelled, deprioritized until upstream fixes land; a v0.28.0 vLLM upgrade tried specifically to fix this did not (§9 risk 26). **Third serving-set candidate, DeepSeek-V3.1-Terminus: staged and running, deprioritized as primary.** Hit the same CUDA-graph/Triton crash as Kimi on first bring-up (same MLA architecture, same `--enforce-eager` fix -- §9 risk 28); its reasoning/content-splitting bug was genuinely fixed for real (a new `chat_template_kwargs` mechanism, not a workaround), but tool-calling under `tool_choice: auto` remains unreliable (works only under `required`) -- kept running as a manually-addressable option, not routed to any Claude Code alias. Along the way, a real Avante session hit the flagship's `max_model_len` ceiling live and exposed a real double-counting bug in the gateway's rendered client config -- both fixed: `max_model_len` raised 65536 -> 131072 (KV-headroom-justified, real-bring-up-verified), and `mr.gateway.render()`'s `max_input_tokens`/`max_output_tokens` split corrected (§9 risk 29). Metrics not started |
+| **5** | Multi-model routing, queue-aware UX, metrics, INT4 conversion for K2-class | — **multi-model routing: done for real, live-verified end to end.** `qwen3-coder-480b-awq` (community AWQ-INT4, ~262 GB) staged, brought up (TP4×PP2, 8 GPUs, `READY after 348s` on the tool-call-fixed run), and now serves Claude Code's real `sonnet` alias through the full stack: real CLI -> gateway -> flagship -> real `Read` tool use -> correct answer. Along the way: fixed a routing bug before it shipped (explicit per-model `role`, §9 risk 20), fixed tool calling that silently returned raw unparsed text instead of structured calls (`qwen3_coder` parser, not `hermes` -- §9 risk 21), and hit the exact stale-long-lived-gateway hazard risk 15 warned about, just failing silently instead of loudly this time (§9 risk 22). Both models run concurrently; Avante.nvim wired up as a second real client (`~/.config/nvim/lua/plugins/avante.lua`). **Queue-aware UX: done** (§9 risk 23) -- the waker's ETA is now real Slurm/registry state, not a fixed guess. **K2-class: attempted, deprioritized** -- `moonshotai/Kimi-K2-Thinking` (594 GB, natively INT4, no conversion pipeline needed after all -- see §9 risk 24) staged and brought up successfully (`READY after 528s` once `--enforce-eager` worked around a real CUDA-graph/Triton crash), but real tool-call and reasoning validation found both broken by an open, unresolved upstream vLLM/Kimi bug (§9 risk 25) -- job cancelled, deprioritized until upstream fixes land; a v0.28.0 vLLM upgrade tried specifically to fix this did not (§9 risk 26). **Third serving-set candidate, DeepSeek-V3.1-Terminus: staged and running, deprioritized as primary.** Hit the same CUDA-graph/Triton crash as Kimi on first bring-up (same MLA architecture, same `--enforce-eager` fix -- §9 risk 28); its reasoning/content-splitting bug was genuinely fixed for real (a new `chat_template_kwargs` mechanism, not a workaround), but tool-calling under `tool_choice: auto` remains unreliable (works only under `required`) -- kept running as a manually-addressable option, not routed to any Claude Code alias. Along the way, a real Avante session hit the flagship's `max_model_len` ceiling live and exposed a real double-counting bug in the gateway's rendered client config -- both fixed: `max_model_len` raised 65536 -> 131072 -> 262144 (the checkpoint's actual native ceiling; KV-headroom-justified, real-bring-up-verified at each step), and `mr.gateway.render()`'s `max_input_tokens`/`max_output_tokens` split corrected (§9 risk 29). A real mid-session crash (a worker died after a 30-min stall, likely from a pathologically oversized request) turned out, on the second recurrence, to have a client-side root cause: Avante resending its full history past even the checkpoint's 262144-token maximum on every request -- fixed with `:AvanteChatNew`/`/clear` in Avante itself, not a server config change (§9 risk 30). Metrics not started |
 
 ---
 
@@ -824,6 +824,54 @@ fails.
     (prompt+requested totaling 78,219 -- would have 400'd under the old 65536 cap by nearly
     13K tokens) and confirmed it now completes cleanly, plus a standard tool-call regression
     check to confirm nothing else broke on the restart.
+30. **The same live Avante session outgrew 131072 too within the hour, then a genuine crash
+    hit mid-session, and the eventual root cause turned out to be client-side, not
+    server-side.** Raised `max_model_len` again, this time straight to the checkpoint's
+    actual native ceiling (262144, `max_position_embeddings` per its `config.json`) --
+    there is no higher number available for this checkpoint, so this was explicitly flagged
+    as the last raise possible, not just the next conservative step. Kept the KV-headroom
+    discipline from risk 29 (598784/262144 = 2.28x headroom, positive but the tightest of
+    the three settings tried) and verified via a real bring-up (`READY after 406s`) plus a
+    reproduction of the exact prior failure size (a real 70,027-token prompt at 8,192
+    requested output, 78,219 combined) succeeding cleanly, plus tool-call regression.
+
+    Shortly after, a real crash hit during live use, unrelated to any action taken here:
+    vLLM's periodic stats logger (fires every ~10s, confirmed from normal operation both
+    before and after) went completely silent for **30 minutes**, then a request was
+    rejected with a normal `400`, and immediately after, `RayWorkerProc rank=[6] died
+    unexpectedly` with **no Python traceback from the worker itself** -- the signature of
+    an external kill (OOM or a stalled health-check timeout), not a raised exception.
+    `ray symmetric-run` did not keep the cluster alive this time (unlike risk 18's pattern
+    with Kimi/DeepSeek) -- the whole job went to `COMPLETING` and had to be fully
+    resubmitted, not just have its engine restarted. Restarted immediately (job 54742975,
+    `READY after 361s`), validated with a real completion, and confirmed live traffic
+    flowing again.
+
+    The crash then **recurred within ~9 minutes of the fresh restart** -- but this time the
+    job stayed healthy (`ready`/`RUNNING`, no dead worker), just another `400`. Since the
+    backend's own KV cache/context was provably empty immediately post-restart, an
+    identical failure recurring that fast meant the oversized data wasn't anything the
+    server had accumulated -- it was being *resent* fresh on every request. Confirmed with
+    the user this was the same `ContextWindowExceededError` as before: **Avante resends its
+    full accumulated conversation history on every request**, and that history had grown
+    past even the checkpoint's absolute 262144-token ceiling. No further server-side
+    `max_model_len` raise was possible or relevant at that point -- the fix was entirely
+    client-side: `:AvanteChatNew` (new chat, doesn't resend prior history) or `/clear` /
+    `:AvanteClear history` (clears the active session) in Avante itself, not a config
+    change here.
+
+    **Open, not fully resolved:** the ~30-minute silent stall preceding the first crash is
+    circumstantially consistent with a single oversized request taking a very long time to
+    tokenize/validate before being rejected, putting sustained memory/compute pressure on a
+    worker until something (OOM-killer, a Ray/NCCL health-check timeout) killed it -- but
+    this is the best-supported hypothesis from the available evidence (the log's own
+    silence and timing), not a confirmed root cause verified against node-level `dmesg` or
+    an NVIDIA/Ray fault trace, which weren't accessible from a login node. A cheap,
+    concrete mitigation not yet built: a fast server-side pre-check (e.g. a rough
+    character-count-based rejection at the gateway, before a request ever reaches vLLM's
+    own slower validation path) so a pathologically oversized request fails in
+    milliseconds instead of stalling the whole engine for half an hour and potentially
+    taking a worker down with it. Worth building if this recurs.
 
 ---
 

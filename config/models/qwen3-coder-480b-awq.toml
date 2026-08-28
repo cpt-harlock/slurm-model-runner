@@ -49,7 +49,22 @@ pipeline_parallel_size = 2    # PP across the 2 nodes, over IB
 # max_model_len can grow graph-capture buffer requirements in ways the KV pool
 # math alone doesn't cover -- verified via a real bring-up before trusting it,
 # not assumed from the KV math alone.
-max_model_len = 131072
+#
+# Raised again to the native 262144 ceiling after the SAME live Avante
+# session hit 131072 too, within the same hour: a 122,881-token prompt plus
+# an 8,192-token request summed to 131,073. This is real, fast agentic-
+# session context growth (tool-heavy conversations accumulate history
+# quickly), not a one-off -- and 262144 is this checkpoint's actual maximum
+# (max_position_embeddings per config.json), so there is no higher ceiling
+# to raise to if a session grows past this too. At that point the fix is
+# session-side (compact/restart the conversation), not server-side. Keeps
+# ~2.28x concurrency headroom in the pinned 598,784-token KV pool
+# (598784/262144) -- positive but the tightest of the three settings tried;
+# verified via a real bring-up (not assumed) specifically because this is
+# now a 4x jump from the original conservative starting point and
+# CUDA-graph capture memory at this size was a real unknown, not a
+# formality.
+max_model_len = 262144
 gpu_memory_utilization = 0.85
 # --kv-cache-memory-bytes pins the KV cache pool explicitly, same lesson as
 # qwen3-32b.toml (architecture.md §9 risk 9): this value is specific to this

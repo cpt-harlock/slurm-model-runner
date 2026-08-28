@@ -22,7 +22,7 @@ build-out, and a running log of concrete issues hit and how they were fixed.
 | Model | Role | Nodes | Status |
 |---|---|---|---|
 | `qwen3-32b` | fast/small | 1 | serving |
-| `qwen3-coder-480b-awq` | primary (flagship) | 2 | serving, `max_model_len=131072` |
+| `qwen3-coder-480b-awq` | primary (flagship) | 2 | serving, `max_model_len=262144` (native ceiling) |
 | `deepseek-v3.1-terminus` | — | 2 | serving, not aliased — reliable tool-calling needs `tool_choice: required` |
 | `kimi-k2-thinking` | — | 4 | staged, blocked on an upstream vLLM/tool-parser bug |
 

@@ -41,7 +41,15 @@ return {
           model = "qwen3-coder-480b-awq", -- match a `name` from `mrctl models`
           api_key_name = "",
           timeout = 300000, -- 5 min: a cold-start wake can take a few minutes on its own
-          context_window = 65536, -- match that model's config `max_model_len`
+          -- Must match the real max_model_len in this model's own
+          -- config/models/<name>.toml -- there is no automatic sync between
+          -- the two, so update this by hand whenever that value changes. A
+          -- stale (too-low) context_window here doesn't fully protect you:
+          -- a real live session hit ContextWindowExceededError against the
+          -- actual vLLM backend limit even while this field lagged behind
+          -- it, so treat this as "tell Avante the truth," not "Avante will
+          -- enforce a ceiling I never actually configured on the backend."
+          context_window = 262144, -- match that model's config `max_model_len`
           use_response_api = false, -- vLLM/LiteLLM here speak Chat Completions, not the Response API
           support_previous_response_id = false,
           extra_request_body = {
