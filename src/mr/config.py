@@ -96,14 +96,29 @@ class ModelSpec:
     # </think> lands in its generated output where the parser can find it --
     # confirmed live: content splits correctly, real reasoning preserved.
     chat_template_kwargs: dict = field(default_factory=dict)
+    # Per-model container image. Empty means the global MR_SIF. A bare file
+    # name resolves next to MR_SIF (the containers dir), so a TOML can say
+    # sif = "vllm-0.32.sif" without hardcoding $SCRATCH. Exists so a newer vLLM
+    # (needed for e.g. DeepSeek-V3.2's sparse attention) can be adopted per
+    # model, while proven models stay on the image they were validated with.
+    sif: Path = Path()
 
     def __post_init__(self) -> None:
         self.served_name = self.served_name or self.name
         self.weights_dir = Path(self.weights_dir or MR_WEIGHTS / self.hf_repo.split("/")[-1])
+        self.sif = resolve_sif(self.sif)
 
     @property
     def world_size(self) -> int:
         return self.engine.tensor_parallel_size * self.engine.pipeline_parallel_size
+
+
+def resolve_sif(value: str | Path) -> Path:
+    value = str(value or "")
+    if value in ("", "."):
+        return MR_SIF
+    p = Path(value)
+    return p if p.is_absolute() else MR_SIF.parent / p
 
 
 def load(name: str) -> ModelSpec:
@@ -123,6 +138,7 @@ def load(name: str) -> ModelSpec:
         role=raw.get("role", ""),
         measured_load_s=raw.get("measured_load_s", 0),
         chat_template_kwargs=raw.get("chat_template_kwargs", {}),
+        sif=raw.get("sif", ""),
         slurm=SlurmSpec(**raw.get("slurm", {})),
         engine=EngineSpec(**raw.get("engine", {})),
     )

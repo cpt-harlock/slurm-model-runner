@@ -30,7 +30,7 @@ def _write_spec(m: config.ModelSpec) -> str:
                 "name": m.name,
                 "served_name": m.served_name,
                 "weights_dir": str(m.weights_dir),
-                "sif": str(config.MR_SIF),
+                "sif": str(m.sif),
                 "state_dir": str(config.MR_STATE),
                 "engine": {
                     "tensor_parallel_size": m.engine.tensor_parallel_size,
@@ -49,8 +49,8 @@ def _write_spec(m: config.ModelSpec) -> str:
 def cmd_up(args) -> int:
     m = config.load(args.model)
 
-    if not config.MR_SIF.exists():
-        print(f"container missing: {config.MR_SIF}\n  run scripts/build-container.sh", file=sys.stderr)
+    if not m.sif.exists():
+        print(f"container missing: {m.sif}\n  run scripts/build-container.sh", file=sys.stderr)
         return 1
     if not m.weights_dir.exists():
         print(f"weights missing: {m.weights_dir}\n  run `mrctl stage {m.name}`", file=sys.stderr)
