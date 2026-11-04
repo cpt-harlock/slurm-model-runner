@@ -1,0 +1,57 @@
+# Kimi K3 (moonshotai/Kimi-K3): 2.8T params, 1454 GiB, native MXFP4 weights
+# (quantization-aware trained; compressed-tensors "mxfp4-pack-quantized",
+# input_activations=None, i.e. weight-only) with BF16 attention/shared experts.
+# Architecture: KDA (Kimi Delta Attention, linear) on 69 of 93 layers, dense
+# MLA (no DSA indexer) on the other 24, 896 latent-MoE experts.
+#
+# kimi-k2-thinking.toml ruled K3 out as "Hopper/Ada territory" on paper. A real
+# A100 says otherwise (debug job 63492755, vLLM 0.32, dummy weights, 5 layers,
+# TP4): MoE -> "Using 'MARLIN' Mxfp4 MoE backend" (W4A16, no FP8 involved),
+# MLA -> TRITON_MLA, KDA -> the Triton fallback (its fused kernels are SM90+
+# only and are skipped, not required). PROBE_OK. Real weights not yet run.
+#
+# Size: 1454 GiB / 32 GPUs = ~45 GiB of weights per GPU. That needs all 8
+# nodes -- the whole boost_qos_lprod cap -- so it cannot run alongside any
+# other multi-node model. The probe also showed a transient allocator-OOM
+# storm on one rank during load (free dropped to 8.9 MB, then recovered):
+# with ~45 GiB resident instead of ~18 GiB this is the first thing to watch.
+#
+# Weights live on $SCRATCH (no quota, but subject to the purge policy) --
+# $FAST's 1 TB quota cannot hold them.
+name = "kimi-k3"
+hf_repo = "moonshotai/Kimi-K3"
+weights_dir = "/leonardo_scratch/large/userinternal/amonteru/weights/Kimi-K3"
+sif = "vllm-0.32.sif"   # needs vLLM 0.32's KimiK3ForConditionalGeneration
+
+idle_timeout_s = 1800
+handoff_lead_s = 3600   # placeholder until a real bring-up measures load time
+
+[slurm]
+account = "cin_staff"
+partition = "boost_usr_prod"
+qos = "boost_qos_lprod"       # 4 days, <=8 nodes / 32 GPUs; this uses all 8
+nodes = 8
+time = "4-00:00:00"
+cpus_per_task = 32
+gpus_per_node = 4
+
+[engine]
+tensor_parallel_size = 4      # TP within each node, over NVLink
+pipeline_parallel_size = 8    # PP across the 8 nodes, over IB
+# Native context is 1M tokens. The KV/state budget per GPU is small (~8 GiB
+# left after weights at 0.85), so start at 65536 and raise once a real
+# bring-up reports its KV cache size, same discipline as the other flagships.
+max_model_len = 65536
+gpu_memory_utilization = 0.85
+# Flags from vLLM's own Kimi-K3 recipe, minus everything Hopper/Blackwell- or
+# FP8-only (--kv-cache-dtype fp8, TOKENSPEED_MLA, DCP, fastsafetensors):
+#   --language-model-only: skip the vision tower (text-only coding use), saves
+#     memory we do not have to spare.
+#   kimi_k3 tool/reasoning parsers: registered in this container
+#     (vllm.tool_parsers.kimi_k3_tool_parser, vllm.reasoning.kimi_k3_reasoning_parser).
+extra_args = [
+  "--trust-remote-code",
+  "--language-model-only",
+  "--enable-auto-tool-choice", "--tool-call-parser", "kimi_k3",
+  "--reasoning-parser", "kimi_k3",
+]

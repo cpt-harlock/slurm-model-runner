@@ -95,6 +95,18 @@ env -u PIP_CERT -u REQUESTS_CA_BUNDLE -u CURL_CA_BUNDLE -u SSL_CERT_FILE \
 echo "removing torchcodec (CUDA-13 build in a CUDA-12 image)"
 singularity exec --writable "$SANDBOX" pip uninstall -y torchcodec || true
 
+# v0.32.0-cu129's FlashInfer top-k/top-p sampler crashes on A100 at the first
+# sampled token: "TopKMaskLogits failed with error code device kernel image is
+# invalid" (flashinfer 0.7.0.post1, despite flashinfer-jit-cache-sm80 being
+# installed). Killed both production models in their 0.32 regression runs (jobs
+# 63466811, 63466815); VLLM_USE_FLASHINFER_SAMPLER=0 (PyTorch sampler) fixes it,
+# verified on a real A100 (debug job 63492590). It belongs to the image, not to
+# any one model, so it is baked in here as an overridable default
+# (SINGULARITYENV_VLLM_USE_FLASHINFER_SAMPLER=1 re-enables it to retest).
+echo "baking VLLM_USE_FLASHINFER_SAMPLER=0 into the image env"
+echo 'export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"' \
+  > "$SANDBOX/.singularity.d/env/91-model-runner.sh"
+
 echo "repacking sandbox -> ${DEST}"
 singularity build --force "$DEST" "$SANDBOX"
 rm -rf "$SANDBOX"
@@ -103,4 +115,5 @@ echo
 echo "sanity check:"
 singularity exec "$DEST" python3 -c "import vllm, torch, ray; print('vllm', vllm.__version__, '| torch', torch.__version__, '| ray', ray.__version__)"
 singularity exec "$DEST" ray --version
+singularity exec "$DEST" sh -c 'echo "VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER}"'
 echo "ok -> $DEST"

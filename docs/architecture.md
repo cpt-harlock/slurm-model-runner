@@ -876,6 +876,28 @@ fails.
     tradeoff (a 30-min gap in real interactive use costs a ~6min cold-start on the next
     request) but that is a policy choice about resource cost vs. availability, not a bug.
 
+31. **DeepSeek-V3.2 / GLM-5.x (DSA sparse attention) cannot run on A100 with any CUDA-12
+    vLLM -- the "backport" is model routing, not an SM80 kernel.** vLLM v0.32.0-cu129 is the
+    last image buildable for Booster's R535 driver (v0.33.0 dropped cu129 images and wheels,
+    #62575). Its #52861 change only moves `DeepseekV32ForCausalLM`/`GlmMoeDsaForCausalLM` onto
+    the common CUDA model path; every sparse-MLA backend it ships (`FLASHMLA_SPARSE`,
+    `FLASH_ATTN_MLA_SPARSE`, `FLASHINFER_MLA_SPARSE_SM90`) requires SM90/SM100/SM120, and the
+    only SM80-capable MLA backend (`TRITON_MLA`) is dense-only. Confirmed on a real A100
+    (debug job 63465981, dummy-weight probe, both `QuantTrio/DeepSeek-V3.2-AWQ` and
+    `cyankiwi/GLM-5.3-AWQ-INT4`): `ValueError: No valid attention backend found ...
+    use_sparse=True ... TRITON_MLA: [sparse not supported]`. A driver upgrade to >=580 (for
+    v0.33+) would not change this either -- no newer release adds an SM80 sparse kernel.
+    Weights stay staged under `$SCRATCH/weights/`, TOMLs parked in `config/blocked/`, ready
+    if Hopper/Blackwell nodes or an upstream SM80 sparse-MLA kernel ever appear.
+
+    Two build fixes were needed on the way, both now in `scripts/build-container.sh`:
+    the host's `PIP_CERT`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` point at a RHEL path absent in
+    the Ubuntu image (pip: "Could not find a suitable TLS CA certificate bundle"), and the
+    v0.32.0-cu129 image ships a CUDA-13 `torchcodec` whose `OSError: libnvrtc.so.13` escapes
+    vLLM's ImportError guard and kills every `vllm serve` at import (debug job 63458694) --
+    uninstalled in the build. The image is built to its own `vllm-0.32.sif`; a model opts in
+    with `sif = "vllm-0.32.sif"` in its TOML (`ModelSpec.sif`, default = `MR_SIF`).
+
 ---
 
 ## 10. Portability to other Slurm clusters
