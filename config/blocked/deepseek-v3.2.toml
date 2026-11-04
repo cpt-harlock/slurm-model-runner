@@ -21,7 +21,7 @@
 # making this a production model.
 name = "deepseek-v3.2"
 hf_repo = "QuantTrio/DeepSeek-V3.2-AWQ"
-weights_dir = "/leonardo_scratch/large/userinternal/amonteru/weights/DeepSeek-V3.2-AWQ"
+weights_dir = "$SCRATCH/weights/DeepSeek-V3.2-AWQ"
 sif = "vllm-0.32.sif"
 
 idle_timeout_s = 1800
@@ -33,14 +33,8 @@ handoff_lead_s = 3600   # placeholder until measured
 [chat_template_kwargs]
 thinking = true
 
-[slurm]
-account = "cin_staff"
-partition = "boost_usr_prod"
-qos = "boost_qos_lprod"
+[slurm]                       # account/partition/qos/time: config/sites/
 nodes = 2
-time = "4-00:00:00"
-cpus_per_task = 32
-gpus_per_node = 4
 
 [engine]
 tensor_parallel_size = 4

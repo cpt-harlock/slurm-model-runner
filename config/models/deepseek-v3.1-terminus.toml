@@ -42,14 +42,8 @@ handoff_lead_s = 3600
 [chat_template_kwargs]
 thinking = true
 
-[slurm]
-account = "cin_staff"
-partition = "boost_usr_prod"
-qos = "boost_qos_lprod"       # 4 days, <=8 nodes / 32 GPUs
+[slurm]                       # account/partition/qos/time: config/sites/
 nodes = 2
-time = "4-00:00:00"
-cpus_per_task = 32
-gpus_per_node = 4
 
 [engine]
 tensor_parallel_size = 4      # TP within each node, over NVLink

@@ -11,14 +11,8 @@ handoff_lead_s = 3000    # 244s measured load (job 54085509) x1.5 (=366s) + ~45m
                          # guess -- boost_usr_prod/cin_staff queue wait is unmeasured.
                          # Tighten once Phase 3's supervisor logs actual pending time.
 
-[slurm]
-account = "cin_staff"         # shared staff allocation; architecture.md §9
-partition = "boost_usr_prod"
-qos = "boost_qos_lprod"       # 4 days, <=8 nodes / 32 GPUs
+[slurm]                       # account/partition/qos/time: config/sites/
 nodes = 1
-time = "4-00:00:00"
-cpus_per_task = 32
-gpus_per_node = 4
 
 [engine]
 tensor_parallel_size = 4      # TP within the node, over NVLink

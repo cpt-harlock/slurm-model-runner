@@ -14,13 +14,58 @@ from pathlib import Path
 
 MR_ROOT = Path(os.environ.get("MR_ROOT", Path(__file__).resolve().parents[2]))
 
+# Which cluster we are on: config/sites/<MR_SITE>.toml holds everything that
+# differs between clusters (Slurm account/partition/qos/walltime, NCCL
+# interfaces, weights tier, container tag). Defaults to the original target.
+MR_SITE = os.environ.get("MR_SITE", "leonardo")
+SITES_DIR = MR_ROOT / "config" / "sites"
+
+
+@dataclass
+class Site:
+    name: str
+    weights: str = ""
+    bind_roots: list[str] = field(default_factory=list)
+    image: dict = field(default_factory=dict)
+    slurm: dict = field(default_factory=dict)
+    env: dict = field(default_factory=dict)
+
+
+def load_site(name: str) -> Site:
+    path = SITES_DIR / f"{name}.toml"
+    if not path.exists():
+        known = ", ".join(sorted(p.stem for p in SITES_DIR.glob("*.toml")))
+        raise FileNotFoundError(f"no site profile {path} (MR_SITE={name!r}); known: {known}")
+    raw = tomllib.loads(path.read_text())
+    return Site(
+        name=name,
+        weights=raw.get("weights", ""),
+        bind_roots=raw.get("bind_roots", []),
+        image=raw.get("image", {}),
+        slurm=raw.get("slurm", {}),
+        env={k: str(v) for k, v in raw.get("env", {}).items()},
+    )
+
+
+def _expand(value: str, what: str) -> Path:
+    out = os.path.expandvars(value)
+    if "$" in out:
+        raise RuntimeError(
+            f"{what} = {value!r} needs an unset environment variable "
+            f"(site {MR_SITE!r}); set it, or MR_SITE / MR_WEIGHTS for this cluster"
+        )
+    return Path(out)
+
+
+SITE = load_site(MR_SITE)
+
 # Runtime state: registry, specs, rendered sbatch, logs. Shared FS, must be
 # visible from both login and compute nodes.
 MR_STATE = Path(os.environ.get("MR_STATE", Path(os.environ["SCRATCH"]) / "model-runner"))
 
-# Model weights. Flash tier by default -- there is no node-local disk, so Lustre
-# read bandwidth is literally the cold-start time.
-MR_WEIGHTS = Path(os.environ.get("MR_WEIGHTS", Path(os.environ["FAST"]) / "weights"))
+# Model weights: the site's fastest shared tier (there is no node-local disk on
+# Leonardo, so Lustre read bandwidth is literally the cold-start time).
+MR_WEIGHTS = Path(os.environ.get("MR_WEIGHTS") or _expand(SITE.weights, "site weights"))
 
 # Singularity image built by scripts/build-container.sh
 MR_SIF = Path(os.environ.get("MR_SIF", MR_STATE / "containers" / "vllm.sif"))
@@ -33,11 +78,13 @@ MODELS_DIR = MR_ROOT / "config" / "models"
 
 @dataclass
 class SlurmSpec:
+    # No site-specific defaults here: they come from config/sites/<MR_SITE>.toml
+    # [slurm], which load() merges under the model's own [slurm] keys.
     account: str
-    partition: str = "boost_usr_prod"
-    qos: str = "boost_qos_lprod"
+    partition: str
+    qos: str
+    time: str
     nodes: int = 1
-    time: str = "4-00:00:00"
     cpus_per_task: int = 32
     gpus_per_node: int = 4
 
@@ -105,7 +152,11 @@ class ModelSpec:
 
     def __post_init__(self) -> None:
         self.served_name = self.served_name or self.name
-        self.weights_dir = Path(self.weights_dir or MR_WEIGHTS / self.hf_repo.split("/")[-1])
+        # weights_dir may name an env var ("$SCRATCH/weights/X") so a TOML that
+        # needs a bigger tier than the site default stays portable.
+        self.weights_dir = (_expand(str(self.weights_dir), f"{self.name} weights_dir")
+                            if str(self.weights_dir) not in ("", ".")
+                            else MR_WEIGHTS / self.hf_repo.split("/")[-1])
         self.sif = resolve_sif(self.sif)
 
     @property
@@ -128,6 +179,13 @@ def load(name: str) -> ModelSpec:
     if not path.exists():
         raise FileNotFoundError(f"no model config {path}; try `mrctl models`")
     raw = tomllib.loads(path.read_text())
+    # Precedence, lowest first: site profile < model TOML < the model's
+    # [sites.<MR_SITE>] table. [slurm]/[engine] merge key by key; any other key
+    # in the per-site table replaces the model's (e.g. sif, weights_dir).
+    over = raw.get("sites", {}).get(MR_SITE, {})
+    slurm = {**SITE.slurm, **raw.get("slurm", {}), **over.get("slurm", {})}
+    engine = {**raw.get("engine", {}), **over.get("engine", {})}
+    raw = {**raw, **{k: v for k, v in over.items() if k not in ("slurm", "engine")}}
     return ModelSpec(
         name=raw.get("name", name),
         hf_repo=raw["hf_repo"],
@@ -139,8 +197,8 @@ def load(name: str) -> ModelSpec:
         measured_load_s=raw.get("measured_load_s", 0),
         chat_template_kwargs=raw.get("chat_template_kwargs", {}),
         sif=raw.get("sif", ""),
-        slurm=SlurmSpec(**raw.get("slurm", {})),
-        engine=EngineSpec(**raw.get("engine", {})),
+        slurm=SlurmSpec(**slurm),
+        engine=EngineSpec(**engine),
     )
 
 

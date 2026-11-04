@@ -33,9 +33,18 @@ ulimit -t unlimited
 # GLM-5.x DSA on the CUDA path on all GPUs, i.e. A100 too). Built to its own
 # file so models opt in via `sif = "vllm-0.32.sif"` in their TOML, and a bare
 # re-run never overwrites vllm.sif, which the proven models still run on.
-TAG="${1:-v0.32.0-cu129}"
+#
+# The per-cluster defaults (tag, output file name, bind roots, baked-in env)
+# now come from config/sites/<MR_SITE>.toml [image]; Leonardo's is still
+# v0.32.0-cu129 -> vllm-0.32.sif. Arguments override: <tag> [<dest>].
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+site() { PYTHONPATH="${REPO}/src" python3 -c "from mr import config as c; print($1)"; }
 STATE_DIR="${MR_STATE:-${SCRATCH}/model-runner}"
-DEST="${2:-${STATE_DIR}/containers/vllm-0.32.sif}"
+TAG="${1:-$(site "c.SITE.image['tag']")}"
+DEST="${2:-${STATE_DIR}/containers/$(site "c.SITE.image['dest']")}"
+read -r -a BIND_ROOTS <<< "$(site "' '.join(c.SITE.bind_roots)")"
+IMAGE_ENV="$(site "'\\n'.join(f'export {k}=\"\${{{k}:-{v}}}\"' for k, v in c.SITE.image.get('env', {}).items())")"
+echo "site ${MR_SITE:-leonardo}: ${TAG} -> ${DEST}"
 
 mkdir -p "$(dirname "$DEST")"
 
@@ -67,7 +76,7 @@ singularity build --sandbox "$SANDBOX" "docker://vllm/vllm-openai:${TAG}"
 # this, `singularity exec --writable` on this site fails with "can't create
 # /leonardo destination automatically without overlay or underlay". Bind
 # targets must exist for real inside the sandbox first.
-mkdir -p "$SANDBOX"/{leonardo,leonardo_scratch,leonardo_work,leonardo_prod}
+for r in "${BIND_ROOTS[@]}"; do mkdir -p "${SANDBOX}${r}"; done
 
 echo "installing ray[default] into the sandbox"
 # No -C/--containall: it swaps in a small tmpfs-backed ephemeral home/tmp
@@ -103,9 +112,12 @@ singularity exec --writable "$SANDBOX" pip uninstall -y torchcodec || true
 # verified on a real A100 (debug job 63492590). It belongs to the image, not to
 # any one model, so it is baked in here as an overridable default
 # (SINGULARITYENV_VLLM_USE_FLASHINFER_SAMPLER=1 re-enables it to retest).
-echo "baking VLLM_USE_FLASHINFER_SAMPLER=0 into the image env"
-echo 'export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"' \
-  > "$SANDBOX/.singularity.d/env/91-model-runner.sh"
+# Which defaults to bake is per site ([image] env), since this one is an
+# A100-specific workaround.
+if [[ -n "$IMAGE_ENV" ]]; then
+  echo "baking site image env:"; echo "$IMAGE_ENV"
+  echo "$IMAGE_ENV" > "$SANDBOX/.singularity.d/env/91-model-runner.sh"
+fi
 
 echo "repacking sandbox -> ${DEST}"
 singularity build --force "$DEST" "$SANDBOX"
@@ -115,5 +127,5 @@ echo
 echo "sanity check:"
 singularity exec "$DEST" python3 -c "import vllm, torch, ray; print('vllm', vllm.__version__, '| torch', torch.__version__, '| ray', ray.__version__)"
 singularity exec "$DEST" ray --version
-singularity exec "$DEST" sh -c 'echo "VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER}"'
+singularity exec "$DEST" sh -c 'cat /.singularity.d/env/91-model-runner.sh 2>/dev/null || true'
 echo "ok -> $DEST"

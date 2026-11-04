@@ -910,12 +910,22 @@ Slurm cluster looks like mostly a config exercise, with two real exceptions.
 
 **Config-only, already parameterized — just swap values:**
 
-- Slurm `account`/`partition`/`qos`/`time` per model (`config/models/*.toml` `[slurm]`).
+- **Site profile** (`config/sites/<MR_SITE>.toml`, added for the Pitagora port): Slurm
+  `account`/`partition`/`qos`/`time`, the weights tier, NCCL interfaces and
+  `MR_HOST_IFACE` (`[env]`, exported by `vllm-server.sbatch`), the image's bind roots and
+  default tag (`[image]`, read by `build-container.sh`). Precedence, lowest first: site
+  profile < model TOML < the model's `[sites.<MR_SITE>]` table. Model TOMLs now carry only
+  `nodes` in `[slurm]`; the refactor was checked to resolve every Leonardo model to the
+  exact same spec as before.
 - Filesystem tiers (`MR_ROOT`, `MR_STATE`, `MR_WEIGHTS` env vars, §Setup) — already
-  indirected, just point them at the target cluster's equivalent of `$WORK`/`$SCRATCH`/`$FAST`.
-- Container CUDA/driver generation (`scripts/build-container.sh`'s default tag) — re-derive
-  §1's driver-version check against the new cluster's actual driver, then pick the matching
+  indirected; `weights_dir` in a model TOML may use `$VARS` (`$SCRATCH/weights/Kimi-K3`).
+- Container CUDA/driver generation (the site's `[image] tag`) — re-derive §1's
+  driver-version check against the new cluster's actual driver, then pick the matching
   `-cu12x`/`-cu13x` tag the same way risk 7 documents.
+- **Walltime is not portable as an assumption.** Leonardo's `boost_qos_lprod` allows 4 days;
+  Pitagora caps every Booster job at 24 h. There the overlapping handoff (§4) runs daily
+  for every backend, so the handoff/respawn risks from the study (docs/study-guide.md R1,
+  R2) must be fixed before relying on it.
 
 **Already portable, not a risk despite looking site-specific:**
 

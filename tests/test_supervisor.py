@@ -22,7 +22,7 @@ def make_spec(handoff_lead_s: int = 3000, idle_timeout_s: int = 1800) -> config.
     return config.ModelSpec(
         name=MODEL,
         hf_repo="Qwen/Qwen3-32B",
-        slurm=config.SlurmSpec(account="cin_staff"),
+        slurm=config.SlurmSpec(**config.SITE.slurm),
         engine=config.EngineSpec(),
         handoff_lead_s=handoff_lead_s,
         idle_timeout_s=idle_timeout_s,

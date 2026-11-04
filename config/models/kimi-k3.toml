@@ -20,20 +20,14 @@
 # $FAST's 1 TB quota cannot hold them.
 name = "kimi-k3"
 hf_repo = "moonshotai/Kimi-K3"
-weights_dir = "/leonardo_scratch/large/userinternal/amonteru/weights/Kimi-K3"
+weights_dir = "$SCRATCH/weights/Kimi-K3"
 sif = "vllm-0.32.sif"   # needs vLLM 0.32's KimiK3ForConditionalGeneration
 
 idle_timeout_s = 1800
 handoff_lead_s = 3600   # placeholder until a real bring-up measures load time
 
-[slurm]
-account = "cin_staff"
-partition = "boost_usr_prod"
-qos = "boost_qos_lprod"       # 4 days, <=8 nodes / 32 GPUs; this uses all 8
+[slurm]                       # account/partition/qos/time: config/sites/
 nodes = 8
-time = "4-00:00:00"
-cpus_per_task = 32
-gpus_per_node = 4
 
 [engine]
 tensor_parallel_size = 4      # TP within each node, over NVLink
@@ -55,3 +49,15 @@ extra_args = [
   "--enable-auto-tool-choice", "--tool-call-parser", "kimi_k3",
   "--reasoning-parser", "kimi_k3",
 ]
+
+# Pitagora: H100 (80-94 GB) -> 1454 GiB / 24 GPUs = ~61 GiB per GPU fits in 6
+# nodes with real KV headroom. Uses the site's default image (no per-model
+# 0.32 pin there). Untested until the site's image and NCCL are verified.
+[sites.pitagora]
+sif = ""
+
+[sites.pitagora.slurm]
+nodes = 6
+
+[sites.pitagora.engine]
+pipeline_parallel_size = 6

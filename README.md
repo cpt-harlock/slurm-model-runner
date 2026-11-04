@@ -54,14 +54,21 @@ tests/
 ## Setup
 
 ```bash
+export MR_SITE=leonardo                      # config/sites/<name>.toml (leonardo | pitagora)
 export MR_ROOT=$HOME/model-runner
 export MR_STATE=$SCRATCH/model-runner       # registry, logs, caches
-export MR_WEIGHTS=$FAST/weights             # flash tier -- there is no node-local disk
+# MR_WEIGHTS defaults to the site's `weights` ($FAST/weights on Leonardo)
 export PYTHONPATH=$MR_ROOT/src:$PYTHONPATH
 alias mrctl='python3 -m mr.cli'
 
 ./scripts/build-container.sh                # login node only; needs internet
 ```
+
+`build-container.sh` takes its default tag and output file from the site's `[image]`
+table. On Leonardo that is `v0.32.0-cu129` -> `vllm-0.32.sif` (the last CUDA-12 vLLM),
+built next to the `vllm.sif` (v0.28.0) the older models were validated on; a model opts
+into the newer image with `sif = "vllm-0.32.sif"` in its TOML. A fresh Leonardo install
+that needs `vllm.sif` too runs `./scripts/build-container.sh v0.28.0-cu129 $MR_STATE/containers/vllm.sif`.
 
 ## Usage
 
@@ -104,11 +111,15 @@ Nothing about the core design — the file-based registry, the reconcile loop, t
 rendering live backend state into client config — is Leonardo-specific. Porting elsewhere
 is mostly a config exercise:
 
-- Set the Slurm `account`/`partition`/`qos`/`time` in each `config/models/*.toml` to the
-  target cluster's own values.
-- Point `MR_ROOT`/`MR_STATE`/`MR_WEIGHTS` at that cluster's filesystem tiers.
-- Re-derive the container's CUDA/driver tag (`scripts/build-container.sh`'s default)
-  against the target cluster's actual driver version, the same way Leonardo's was pinned.
+- Add a `config/sites/<cluster>.toml` (copy `leonardo.toml`) and set `MR_SITE`: Slurm
+  `account`/`partition`/`qos`/`time`, the weights tier, NCCL interfaces (`[env]`), the
+  image's bind roots, and the container tag (`[image]`). Model TOMLs only carry what is
+  per-model (`nodes`, parallelism, parsers); a `[sites.<cluster>]` table in one overrides
+  it for that cluster only (e.g. `kimi-k3.toml`: 8 nodes on Leonardo, 6 on Pitagora).
+- Point `MR_ROOT`/`MR_STATE` at that cluster's filesystem tiers.
+- Re-derive the container's CUDA/driver tag against the target cluster's actual driver
+  version, the same way Leonardo's was pinned. `config/sites/pitagora.toml` is the first
+  such profile, not yet verified on a compute node (its TODOs list what is missing).
 
 Two things need re-verifying against the new hardware/filesystem rather than a value swap:
 the `NCCL_IB_HCA` device names in `slurm/vllm-server.sbatch` (Leonardo's actual InfiniBand

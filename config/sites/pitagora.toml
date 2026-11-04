@@ -1,0 +1,48 @@
+# Site profile: CINECA Pitagora Booster. Select with MR_SITE=pitagora.
+#
+# Facts from docs.hpc.cineca.it/hpc/pitagora.html and a login-node check
+# (2026-11-04): 168 Booster nodes, 4x H100 SXM per node (docs say 80 GB, the
+# hardware page 94 GB -- confirm with nvidia-smi), 64 cores, 512 GiB RAM,
+# ConnectX-7 NDR200 with GPUDirect RDMA on. Apptainer 1.4.5 (`singularity`
+# is an alias for it). Login nodes have internet; 2FA required.
+#
+# NOT YET VERIFIED ON A COMPUTE NODE -- see the TODOs below. Nothing here has
+# run a real job yet.
+
+# No $FAST on Pitagora. $SCRATCH (/pitagora_scratch/...) has no quota but is
+# subject to the purge policy -- re-stage if weights age out.
+weights = "$SCRATCH/weights"
+
+# The cindata areas resolve under /.pitagora/..., with /pitagora* in front.
+bind_roots = ["/pitagora", "/pitagora_work", "/pitagora_scratch", "/.pitagora"]
+
+[image]
+# TODO: pick from the compute nodes' driver version. H100 is SM 9.0: with a
+# driver >=580, a CUDA-13 vLLM (v0.33+) is possible; otherwise the same
+# v0.32.0-cu129 as Leonardo. Either way the A100-only FlashInfer sampler
+# workaround is NOT carried over -- re-test before adding it here.
+tag = "v0.32.0-cu129"
+dest = "vllm.sif"
+env = {}
+
+[slurm]
+account = "cin_staff"
+partition = "boost_fua_prod"
+qos = "normal"                # <=16 nodes per job, 32 per user
+# 24 h walltime cap, no long QoS like Leonardo's boost_qos_lprod: every backend
+# hits its wall daily, so the overlapping handoff (architecture.md §4) is the
+# normal path here, not the rare one.
+time = "24:00:00"
+cpus_per_task = 32            # of 64 per node
+gpus_per_node = 4
+
+[env]
+# The docs warn TCP traffic can hang when the wrong IB interface is picked
+# (ibp63s0.8005 is firewalled); "=" makes NCCL match the name exactly instead
+# of as a prefix.
+NCCL_SOCKET_IFNAME = "=ibp63s0"
+NCCL_IB_DISABLE = "0"
+# Resolve VLLM_HOST_IP from this interface instead of `hostname -i`.
+MR_HOST_IFACE = "ibp63s0"
+# TODO: NCCL_IB_HCA once `ibstat -l` on a Booster node is known (ConnectX-7
+# auto-detection is usually fine; pin it only if NCCL picks a wrong port).

@@ -1,0 +1,50 @@
+# Site profile: CINECA Leonardo Booster.
+#
+# Everything that differs between clusters lives here, not in the model TOMLs
+# or the code. Selected by MR_SITE (default: leonardo). A model TOML can still
+# override any of it -- its own [slurm]/[engine] keys win, and a
+# [sites.<name>] table in it wins over both, for the site it names.
+#
+# Hardware: 4x A100-SXM-64GB per node (SM 8.0 -- no FP8, no sparse-MLA/DSA:
+# architecture.md §9 risk 31), 32 cores, driver R535 (CUDA 12.x only, no
+# forward compat to CUDA 13).
+
+# Model weights. $FAST is the flash tier with a 1 TB quota; there is no
+# node-local disk, so Lustre read bandwidth is the cold-start time. Anything
+# over quota (Kimi-K3, DeepSeek-V3.2, GLM-5.3) sets weights_dir to $SCRATCH.
+weights = "$FAST/weights"
+
+# Host directories that must exist inside the image as bind targets: a
+# writable sandbox exec (scripts/build-container.sh) can't auto-create them.
+bind_roots = ["/leonardo", "/leonardo_scratch", "/leonardo_work", "/leonardo_prod"]
+
+[image]
+# scripts/build-container.sh defaults. v0.32.0-cu129 is the last CUDA-12 vLLM
+# image (v0.33.0 dropped cu129, #62575) -- see that script for the history.
+# Built to its own file so a bare re-run never overwrites vllm.sif, which the
+# proven models were validated on.
+tag = "v0.32.0-cu129"
+dest = "vllm-0.32.sif"
+# Baked into the image env as overridable defaults. vLLM 0.32's FlashInfer
+# top-k/top-p sampler dies on A100 at the first sampled token ("TopKMaskLogits
+# ... device kernel image is invalid", jobs 63466811/63466815); the PyTorch
+# sampler works (debug job 63492590).
+env = { VLLM_USE_FLASHINFER_SAMPLER = "0" }
+
+[slurm]
+account = "cin_staff"         # shared staff allocation; architecture.md §9
+partition = "boost_usr_prod"
+qos = "boost_qos_lprod"       # 4 days, <=8 nodes / 32 GPUs per user
+time = "4-00:00:00"
+cpus_per_task = 32            # the whole node (32 cores)
+gpus_per_node = 4
+
+[env]
+# Exported into every vLLM job (slurm/vllm-server.sbatch).
+#
+# NCCL over Leonardo's dual-rail HDR100: mlx5_0 is Down on these nodes and
+# mlx5_bond_0 is the 25G ethernet, not IB. Pinning explicitly avoids NCCL
+# picking the slow path or hanging on the dead HCA.
+NCCL_IB_HCA = "mlx5_1,mlx5_4"
+NCCL_SOCKET_IFNAME = "ib0"
+NCCL_IB_DISABLE = "0"

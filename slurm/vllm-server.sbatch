@@ -1,5 +1,5 @@
 #!/bin/bash
-# vLLM inference server under Slurm on Leonardo Booster.
+# vLLM inference server under Slurm (site specifics: config/sites/<MR_SITE>.toml).
 #
 # Not submitted by hand -- `mrctl up <model>` renders $MR_SPEC and passes the
 # sbatch resource flags on the command line. Everything variable lives in the
@@ -47,13 +47,26 @@ export VLLM_CACHE_ROOT="${STATE_DIR}/cache/vllm"
 export OUTLINES_CACHE_DIR="${STATE_DIR}/cache/outlines"
 mkdir -p "$HF_HOME" "$XDG_CACHE_HOME" "$TRITON_CACHE_DIR" "$VLLM_CACHE_ROOT"
 
-# --- NCCL over Leonardo's dual-rail HDR100 ----------------------------------
-# mlx5_0 is Down on these nodes; mlx5_bond_0 is the 25G ethernet, not IB.
-# Pinning explicitly avoids NCCL picking the slow path or hanging on the dead HCA.
-export NCCL_IB_HCA=mlx5_1,mlx5_4
-export NCCL_SOCKET_IFNAME=ib0
-export NCCL_IB_DISABLE=0
+# --- site env (NCCL interfaces etc.) ----------------------------------------
+# Comes from config/sites/<MR_SITE>.toml [env] via the spec -- e.g. Leonardo
+# pins NCCL_IB_HCA=mlx5_1,mlx5_4 / NCCL_SOCKET_IFNAME=ib0 there (and says why).
+eval "$(python3 -c "
+import json, shlex
+for k, v in json.load(open('${MR_SPEC}')).get('env', {}).items():
+    print(f'export {k}={shlex.quote(str(v))}')
+")"
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+
+# This node's IP for vLLM/Ray to advertise. `hostname -i` unless the site names
+# an interface (MR_HOST_IFACE), for clusters where the hostname resolves to an
+# address on a network the other nodes shouldn't use.
+host_ip() {
+  if [[ -n "${MR_HOST_IFACE:-}" ]]; then
+    ip -4 -o addr show dev "$MR_HOST_IFACE" | awk '{print $4}' | cut -d/ -f1 | head -1
+  else
+    hostname -i | awk '{print $1}'
+  fi
+}
 # NOTE: VLLM_HOST_IP is deliberately NOT set here. It must be each node's own
 # IP, resolved per-node -- srun propagates the parent's exported environment
 # to every task, so setting it once on the head node would tell every worker
@@ -120,7 +133,7 @@ VLLM_ARGS="--model ${WEIGHTS} \
   ${EXTRA}"
 
 if [[ "${SLURM_JOB_NUM_NODES}" -eq 1 ]]; then
-  export VLLM_HOST_IP="$(hostname -i | awk '{print $1}')"
+  export VLLM_HOST_IP="$(host_ip)"
   $SING vllm serve $VLLM_ARGS &
 else
   # Phase 4. `ray symmetric-run` launches the identical entrypoint on every node
@@ -143,7 +156,8 @@ else
   WORKER_SCRIPT="${STATE_DIR}/specs/${MODEL}.${JOB_ID}.worker.sh"
   cat > "$WORKER_SCRIPT" <<WORKEREOF
 #!/bin/bash
-export VLLM_HOST_IP="\$(hostname -i | awk '{print \$1}')"
+$(declare -f host_ip)
+export VLLM_HOST_IP="\$(host_ip)"
 exec $SING ray symmetric-run --address "${HEAD_NODE}:6379" --min-nodes ${SLURM_JOB_NUM_NODES} -- vllm serve $VLLM_ARGS --distributed-executor-backend ray
 WORKEREOF
   chmod +x "$WORKER_SCRIPT"

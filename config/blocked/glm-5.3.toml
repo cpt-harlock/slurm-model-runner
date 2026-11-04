@@ -19,20 +19,14 @@
 # Weights on $SCRATCH, not $FAST (quota full) -- see deepseek-v3.2.toml.
 name = "glm-5.3"
 hf_repo = "cyankiwi/GLM-5.3-AWQ-INT4"
-weights_dir = "/leonardo_scratch/large/userinternal/amonteru/weights/GLM-5.3-AWQ-INT4"
+weights_dir = "$SCRATCH/weights/GLM-5.3-AWQ-INT4"
 sif = "vllm-0.32.sif"
 
 idle_timeout_s = 1800
 handoff_lead_s = 3600   # placeholder until measured
 
-[slurm]
-account = "cin_staff"
-partition = "boost_usr_prod"
-qos = "boost_qos_lprod"       # <=8 nodes: this model alone takes half of it
+[slurm]                       # account/partition/qos/time: config/sites/
 nodes = 4
-time = "4-00:00:00"
-cpus_per_task = 32
-gpus_per_node = 4
 
 [engine]
 tensor_parallel_size = 4      # TP within each node, over NVLink

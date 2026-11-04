@@ -4,7 +4,7 @@
     mrctl up <model>            submit an inference job
     mrctl status [model]        show backends and their Slurm state
     mrctl down <model>          cancel all backends for a model
-    mrctl stage <model>         download weights to $FAST (login node; needs internet)
+    mrctl stage <model>         download weights to $MR_WEIGHTS (login node; needs internet)
 """
 
 from __future__ import annotations
@@ -32,6 +32,8 @@ def _write_spec(m: config.ModelSpec) -> str:
                 "weights_dir": str(m.weights_dir),
                 "sif": str(m.sif),
                 "state_dir": str(config.MR_STATE),
+                # Site env (NCCL interfaces etc.), exported by the sbatch.
+                "env": config.SITE.env,
                 "engine": {
                     "tensor_parallel_size": m.engine.tensor_parallel_size,
                     "pipeline_parallel_size": m.engine.pipeline_parallel_size,
