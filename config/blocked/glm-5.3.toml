@@ -1,0 +1,48 @@
+# BLOCKED (2026-11-04): does not start on Leonardo's A100s. Verified on a real A100
+# (debug job 63465981, vllm-0.32.sif, dummy weights): vLLM 0.32 has no sparse-MLA
+# attention backend for compute capability 8.0 -- "No valid attention backend found
+# ... use_sparse=True"; FLASHMLA_SPARSE / FLASH_ATTN_MLA_SPARSE / FLASHINFER_MLA_SPARSE_SM90
+# all reject SM80 and TRITON_MLA is dense-only. #52861 only re-routed model classes.
+# Kept outside config/models so the gateway/supervisor never try to launch it.
+# To use: needs Hopper/Blackwell nodes, or an SM80 sparse-MLA kernel upstream.
+#
+# GLM-5.3 (GlmMoeDsaForCausalLM: ~743B MoE / 39B active, MLA + DeepSeek-style sparse
+# attention, native 1M context). Needs the v0.32.0-cu129 image for the DSA path on A100
+# (vLLM v0.29 #52861 routed GLM-5.x DSA to the CUDA path on all GPUs).
+#
+# Checkpoint: cyankiwi/GLM-5.3-AWQ-INT4 -- 488 GB / 98 shards (HF tree API).
+# compressed-tensors pack-quantized, int4 weights, group 32, input_activations: null
+# (weight-only, Marlin on Ampere). Picked over the smaller Int4-Int8Mix variants and the
+# W4AFP8 ones (FP8 activations: no native FP8 on SM80). 488 GB does not fit 2 nodes
+# (512 GB HBM) with any KV room, hence 4 nodes.
+#
+# Weights on $SCRATCH, not $FAST (quota full) -- see deepseek-v3.2.toml.
+name = "glm-5.3"
+hf_repo = "cyankiwi/GLM-5.3-AWQ-INT4"
+weights_dir = "/leonardo_scratch/large/userinternal/amonteru/weights/GLM-5.3-AWQ-INT4"
+sif = "vllm-0.32.sif"
+
+idle_timeout_s = 1800
+handoff_lead_s = 3600   # placeholder until measured
+
+[slurm]
+account = "cin_staff"
+partition = "boost_usr_prod"
+qos = "boost_qos_lprod"       # <=8 nodes: this model alone takes half of it
+nodes = 4
+time = "4-00:00:00"
+cpus_per_task = 32
+gpus_per_node = 4
+
+[engine]
+tensor_parallel_size = 4      # TP within each node, over NVLink
+pipeline_parallel_size = 4    # PP across the 4 nodes, over IB (same layout as Kimi)
+max_model_len = 32768         # conservative first bring-up; native ceiling is 1048576
+gpu_memory_utilization = 0.85
+# From vLLM's GLM-5.3 recipe minus --kv-cache-dtype fp8 (SM80 has no FP8; see config.py).
+# Thinking is always on per the recipe; the glm47 reasoning parser splits it.
+extra_args = [
+  "--tokenizer-mode", "glm5_next",
+  "--enable-auto-tool-choice", "--tool-call-parser", "glm47",
+  "--reasoning-parser", "glm47",
+]

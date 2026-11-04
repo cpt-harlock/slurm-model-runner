@@ -1,0 +1,61 @@
+# BLOCKED (2026-11-04): does not start on Leonardo's A100s. Verified on a real A100
+# (debug job 63465981, vllm-0.32.sif, dummy weights): vLLM 0.32 has no sparse-MLA
+# attention backend for compute capability 8.0 -- "No valid attention backend found
+# ... use_sparse=True"; FLASHMLA_SPARSE / FLASH_ATTN_MLA_SPARSE / FLASHINFER_MLA_SPARSE_SM90
+# all reject SM80 and TRITON_MLA is dense-only. #52861 only re-routed model classes.
+# Kept outside config/models so the gateway/supervisor never try to launch it.
+# To use: needs Hopper/Blackwell nodes, or an SM80 sparse-MLA kernel upstream.
+#
+# DeepSeek-V3.2 (DeepseekV32ForCausalLM: MLA + DeepSeek Sparse Attention "DSA", a
+# lightning indexer picking the top-2048 tokens per query). Passed over in Aug 2026
+# (see deepseek-v3.1-terminus.toml) because DSA had no A100 path; vLLM v0.29 routed
+# "DeepSeek V3.2 / GLM-5.2 DSA to the optimized CUDA path on all GPUs" (#52861), so it
+# needs the v0.32.0-cu129 image (the newest CUDA-12 build: v0.33 dropped cu129).
+#
+# Checkpoint: QuantTrio/DeepSeek-V3.2-AWQ -- 362 GB / 121 shards (HF tree API), AWQ
+# 4-bit gemm g128 weight-only, router gate kept unquantized. Same Marlin-on-Ampere path
+# as qwen3-coder-480b-awq; no FP8 anywhere.
+#
+# Weights on $SCRATCH, not $FAST: the cin_emon $FAST quota had ~330 GB free (2026-11-03).
+# Slower cold starts and subject to the scratch purge policy -- move to $FAST before
+# making this a production model.
+name = "deepseek-v3.2"
+hf_repo = "QuantTrio/DeepSeek-V3.2-AWQ"
+weights_dir = "/leonardo_scratch/large/userinternal/amonteru/weights/DeepSeek-V3.2-AWQ"
+sif = "vllm-0.32.sif"
+
+idle_timeout_s = 1800
+handoff_lead_s = 3600   # placeholder until measured
+
+# The checkpoint's chat_template.jinja defaults to thinking=false, which writes a
+# literal "</think>" into the prompt (template lines 84-87) -- the exact mechanism that
+# broke deepseek-v3.1-terminus's reasoning split. Same fix.
+[chat_template_kwargs]
+thinking = true
+
+[slurm]
+account = "cin_staff"
+partition = "boost_usr_prod"
+qos = "boost_qos_lprod"
+nodes = 2
+time = "4-00:00:00"
+cpus_per_task = 32
+gpus_per_node = 4
+
+[engine]
+tensor_parallel_size = 4
+pipeline_parallel_size = 2
+max_model_len = 32768
+gpu_memory_utilization = 0.85
+# Flags from vLLM's official DeepSeek-V3.2 recipe (recipes.vllm.ai): tokenizer-mode
+# deepseek_v32 makes vLLM encode prompts with V3.2's native DSML format (what the model
+# was trained on) and ignore the checkpoint's chat_template.jinja -- which QuantTrio
+# ships as a V3.1-style adaptation (<｜tool▁calls▁begin｜>...), off-distribution for V3.2.
+# The Aug 2026 rejection reason (tool-call tags leaking into content) must be retested
+# live with a real tool-call request on this image before trusting tool use.
+extra_args = [
+  "--tokenizer-mode", "deepseek_v32",
+  "--enable-auto-tool-choice", "--tool-call-parser", "deepseek_v32",
+  "--reasoning-parser", "deepseek_v3",
+  "--trust-remote-code",
+]
