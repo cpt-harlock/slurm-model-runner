@@ -2,6 +2,7 @@
 # Doubles as ANTHROPIC_SMALL_FAST_MODEL for Claude Code's background tasks.
 name = "qwen3-32b"
 hf_repo = "Qwen/Qwen3-32B"
+sif = "vllm-0.32.sif"   # regression OK 2026-11-05 (job 63496696): completion + tool call
 role = "small"           # answers Claude Code's "haiku" alias; see mr.gateway
 
 idle_timeout_s = 1800    # reap after 30 min idle to protect the allocation

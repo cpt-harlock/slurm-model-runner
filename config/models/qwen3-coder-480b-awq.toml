@@ -7,6 +7,7 @@
 # weights only, not something A100 lacks hardware support for.
 name = "qwen3-coder-480b-awq"
 hf_repo = "TechxGenus/Qwen3-Coder-480B-A35B-Instruct-AWQ"
+sif = "vllm-0.32.sif"   # regression OK 2026-11-05 (job 63496697): completion + tool call
 role = "primary"         # answers Claude Code's sonnet/opus alias; see mr.gateway
 
 idle_timeout_s = 7200    # raised from the default 1800 (30 min): a real
