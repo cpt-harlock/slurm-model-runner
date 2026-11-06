@@ -28,6 +28,7 @@ MAXLEN=$(spec "['engine']['max_model_len']")
 GPUUTIL=$(spec "['engine']['gpu_memory_utilization']")
 EXTRA=$(spec "['engine']['extra_args_str']")
 STATE_DIR=$(spec "['state_dir']")
+READY_TIMEOUT=$(spec ".get('ready_timeout_s', 3600)")
 
 JOB_ID="${SLURM_JOB_ID}"
 HEAD_NODE=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -1)
@@ -168,7 +169,9 @@ SERVER=$!
 # --- readiness --------------------------------------------------------------
 # /health alone is not enough: it can pass while the model is still loading
 # weights. A real completion is the only honest readiness signal.
-for _ in $(seq 1 240); do   # 240 * 15s = 60 min ceiling for Lustre weight load
+# Ceiling is per model (ready_timeout_s in its TOML, default 3600): load time
+# follows weight size and filesystem bandwidth, not a cluster-wide constant.
+for _ in $(seq 1 $(( (READY_TIMEOUT + 14) / 15 ))); do
   if curl -sf "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; then
     publish "state=ready" "ready_at=$(date +%s)"
     echo "READY after $SECONDS s"    # <-- Phase 0: this is the load time to measure

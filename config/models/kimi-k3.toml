@@ -25,6 +25,10 @@ sif = "vllm-0.32.sif"   # needs vLLM 0.32's KimiK3ForConditionalGeneration
 
 idle_timeout_s = 1800
 handoff_lead_s = 3600   # placeholder until a real bring-up measures load time
+# Readiness ceiling: the first real bring-up (job 63571100) was still reading
+# shards (68/96) after 59 min, past the 3600 s default. Two hours until that
+# run reports its real "READY after".
+ready_timeout_s = 7200
 
 [slurm]                       # account/partition/qos/time: config/sites/
 nodes = 8

@@ -32,6 +32,7 @@ def _write_spec(m: config.ModelSpec) -> str:
                 "weights_dir": str(m.weights_dir),
                 "sif": str(m.sif),
                 "state_dir": str(config.MR_STATE),
+                "ready_timeout_s": m.ready_timeout_s,
                 # Site env (NCCL interfaces etc.), exported by the sbatch.
                 "env": config.SITE.env,
                 "engine": {

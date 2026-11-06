@@ -126,6 +126,14 @@ class ModelSpec:
     # separate from handoff_lead_s, which is a derived scheduling margin, not
     # this raw number.
     measured_load_s: int = 0
+    # How long the job's readiness loop (vllm-server.sbatch) waits for the
+    # server to answer before giving up. One cluster-wide hour was fine for
+    # models up to ~600 GB, but Kimi-K3's 1454 GiB was still at 68% of its
+    # shards after 59 minutes on Leonardo's Lustre (job 63571100), and a job
+    # that outlives the loop is never published READY, so the gateway never
+    # routes to it. Per model, and per site via [sites.<MR_SITE>], because it
+    # follows weight size and filesystem bandwidth.
+    ready_timeout_s: int = 3600
     # Static per-request params the gateway should inject into every LiteLLM
     # call for this model (rendered into litellm_params, forwarded straight
     # through hosted_vllm/ to the OpenAI-compatible request body). Exists for
@@ -195,6 +203,7 @@ def load(name: str) -> ModelSpec:
         handoff_lead_s=raw.get("handoff_lead_s", 3600),
         role=raw.get("role", ""),
         measured_load_s=raw.get("measured_load_s", 0),
+        ready_timeout_s=raw.get("ready_timeout_s", 3600),
         chat_template_kwargs=raw.get("chat_template_kwargs", {}),
         sif=raw.get("sif", ""),
         slurm=SlurmSpec(**slurm),

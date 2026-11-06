@@ -74,6 +74,25 @@ class PerSiteOverrideTest(unittest.TestCase):
         self.assertEqual(m.slurm.qos, config.SITE.slurm["qos"])
 
 
+class ReadyTimeoutTest(unittest.TestCase):
+    def test_default_is_one_hour(self):
+        m = config.ModelSpec(name="x", hf_repo="o/X", slurm=None, engine=None)
+        self.assertEqual(m.ready_timeout_s, 3600)
+
+    def test_toml_value_reaches_the_job_spec(self):
+        import json, tempfile
+        from unittest import mock
+        from mr import cli
+        m = config.load("kimi-k3")
+        self.assertGreater(m.ready_timeout_s, 3600)
+        # Never write into the live state dir: a pending job reads its spec there.
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(config, "SPEC_DIR", Path(d)), \
+                mock.patch.object(config, "ensure_dirs", lambda: None):
+            spec = json.loads(open(cli._write_spec(m)).read())
+        self.assertEqual(spec["ready_timeout_s"], m.ready_timeout_s)
+
+
 class WeightsDirTest(unittest.TestCase):
     def test_env_var_in_weights_dir_expands(self):
         import os
