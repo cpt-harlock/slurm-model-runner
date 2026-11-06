@@ -1,13 +1,17 @@
 # Site profile: CINECA Pitagora Booster. Select with MR_SITE=pitagora.
 #
-# Facts from docs.hpc.cineca.it/hpc/pitagora.html and a login-node check
-# (2026-11-04): 168 Booster nodes, 4x H100 SXM per node (docs say 80 GB, the
-# hardware page 94 GB -- confirm with nvidia-smi), 64 cores, 512 GiB RAM,
-# ConnectX-7 NDR200 with GPUDirect RDMA on. Apptainer 1.4.5 (`singularity`
-# is an alias for it). Login nodes have internet; 2FA required.
+# Facts from docs.hpc.cineca.it/hpc/pitagora.html, a login-node check
+# (2026-11-04) and a 1-GPU srun on a Booster node (r309c06s03, 2026-11-06):
+# 168 Booster nodes, 4x H100 SXM per node -- 95830 MiB each (the 94 GB part),
+# compute capability 9.0, driver 580.178.04. 64 cores, 512 GiB RAM, ConnectX-7
+# NDR200 with GPUDirect RDMA on (mlx5_0..mlx5_5; four IB netdevs ibp63s0,
+# ibp82s0, ibp209s0, ibp227s0 -- only ibp63s0 carries an IPv4 address).
+# Node-local /tmp is a 10 GB NVMe: too small for weights, ignore it.
+# Apptainer 1.4.5 (`singularity` is an alias for it). Login nodes have
+# internet; 2FA required.
 #
-# NOT YET VERIFIED ON A COMPUTE NODE -- see the TODOs below. Nothing here has
-# run a real job yet.
+# No real model job has run here yet: the first multi-node bring-up should
+# use NCCL_DEBUG=INFO to confirm which HCAs NCCL picked.
 
 # No $FAST on Pitagora. $SCRATCH (/pitagora_scratch/...) has no quota but is
 # subject to the purge policy -- re-stage if weights age out.
@@ -17,10 +21,11 @@ weights = "$SCRATCH/weights"
 bind_roots = ["/pitagora", "/pitagora_work", "/pitagora_scratch", "/.pitagora"]
 
 [image]
-# TODO: pick from the compute nodes' driver version. H100 is SM 9.0: with a
-# driver >=580, a CUDA-13 vLLM (v0.33+) is possible; otherwise the same
-# v0.32.0-cu129 as Leonardo. Either way the A100-only FlashInfer sampler
-# workaround is NOT carried over -- re-test before adding it here.
+# Driver 580 runs CUDA 13, so a CUDA-13 vLLM (v0.33+) is an option here
+# (it is not on Leonardo's R535). Start on the same v0.32.0-cu129 as Leonardo
+# anyway: one variable at a time, and every model TOML was validated on it.
+# The A100-only FlashInfer sampler workaround is NOT carried over -- the bug
+# was an SM80 kernel image; re-test before adding it here.
 tag = "v0.32.0-cu129"
 dest = "vllm.sif"
 env = {}
@@ -44,5 +49,8 @@ NCCL_SOCKET_IFNAME = "=ibp63s0"
 NCCL_IB_DISABLE = "0"
 # Resolve VLLM_HOST_IP from this interface instead of `hostname -i`.
 MR_HOST_IFACE = "ibp63s0"
-# TODO: NCCL_IB_HCA once `ibstat -l` on a Booster node is known (ConnectX-7
-# auto-detection is usually fine; pin it only if NCCL picks a wrong port).
+# NCCL_IB_HCA left to auto-detection on purpose: the node has six mlx5
+# devices but four IB rails (one per GPU), and which two mlx5 are not IB
+# (Ethernet/RoCE, or the .8005 storage VLAN's) is not known yet. Pinning blind
+# risks dropping a rail. Check `ibv_devinfo | grep -E 'hca_id|link_layer'` and
+# the NCCL_DEBUG=INFO "NET/IB" line on the first multi-node run; pin then.

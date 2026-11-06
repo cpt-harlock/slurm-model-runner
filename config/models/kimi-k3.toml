@@ -50,8 +50,9 @@ extra_args = [
   "--reasoning-parser", "kimi_k3",
 ]
 
-# Pitagora: H100 (80-94 GB) -> 1454 GiB / 24 GPUs = ~61 GiB per GPU fits in 6
-# nodes with real KV headroom. Uses the site's default image (no per-model
+# Pitagora: H100 94 GB (95830 MiB) -> 1454 GiB / 24 GPUs = ~61 GiB per GPU in
+# 6 nodes, ~15 GiB KV/state headroom per GPU at 0.85. 5 nodes (~73 GiB per GPU)
+# would leave too little. Uses the site's default image (no per-model
 # 0.32 pin there). Untested until the site's image and NCCL are verified.
 [sites.pitagora]
 sif = ""
