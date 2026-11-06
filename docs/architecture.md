@@ -924,8 +924,8 @@ Slurm cluster looks like mostly a config exercise, with two real exceptions.
   `-cu12x`/`-cu13x` tag the same way risk 7 documents.
 - **Walltime is not portable as an assumption.** Leonardo's `boost_qos_lprod` allows 4 days;
   Pitagora caps every Booster job at 24 h. There the overlapping handoff (§4) runs daily
-  for every backend, so the handoff/respawn risks from the study (docs/study-guide.md R1,
-  R2) must be fixed before relying on it.
+  for every backend, so the handoff-path risks from the study (docs/study-guide.md R1,
+  R13, R18) and the missing control-plane restarter (R4) must be fixed before relying on it.
 
 **Already portable, not a risk despite looking site-specific:**
 

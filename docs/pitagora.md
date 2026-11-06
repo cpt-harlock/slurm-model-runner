@@ -45,4 +45,5 @@ login node.
    - `ibv_devinfo | grep -E 'hca_id|link_layer'` tells which mlx5 are IB.
 5. **Before production:**
    - The walltime cap is 24 h (`boost_fua_prod`, QoS `normal`), so the handoff to a successor job happens every day, not rarely.
-   - Risks R1 (double launch during handoff) and R2 (no respawn) in `docs/study-guide.md` must be fixed first.
+   - Fix first the handoff-path risks in `docs/study-guide.md` §7. These are R1 (every handoff launches one extra job), R13 (an empty EndTime gives a deadline in the past) and R18 (a late successor leaves a gap).
+   - Also fix R4 first: nothing restarts the control plane (gateway and supervisor).
