@@ -28,7 +28,7 @@ login node.
 
 - **Image:** `v0.32.0-cu129`, the same as Leonardo, so that only one thing changes at a time. CUDA-13 vLLM (v0.33+) is a later, separate step.
 - **FlashInfer sampler:** the workaround (`VLLM_USE_FLASHINFER_SAMPLER=0`) is **not** carried over. It was an SM80 kernel-image bug. Re-test it here before adding it.
-- **`NCCL_IB_HCA`:** left to auto-detection. There are six mlx5 devices for four IB rails, and which two are not IB is not known yet.
+- **`NCCL_IB_HCA`:** pinned to `=mlx5_0,mlx5_1,mlx5_4,mlx5_5`, the four IB rails seen on the first multi-node run (`mlx5_2` is RoCE).
 - **Kimi-K3:** `[sites.pitagora]` in its TOML sets 6 nodes and PP6. That gives about 61 GiB of weights per GPU and about 15 GiB KV headroom at 0.85.
 
 ## Done (2026-11-06)
@@ -43,8 +43,8 @@ login node.
 - **Single node:** `mrctl up qwen3-32b` (job 2791349) reached `ready`. Weights load in 14.6 s, KV cache is 591k tokens. A real completion and a real `auto` tool call both work.
 - **FlashInfer sampler** works on H100 without the A100 workaround: the first sampled token did not crash.
 - **Multi-node:** `mrctl up qwen3-coder-480b-awq` (job 2793087, 2 nodes, TP4 x PP2, `NCCL_DEBUG=INFO`) reached `ready`. Weights load in about 175 s, KV cache is 485k tokens. A real completion and a real `auto` tool call work, directly and through the gateway.
-  - NCCL lists `mlx5_0`, `mlx5_1`, `mlx5_4`, `mlx5_5` as IB and `mlx5_2` as **RoCE**; `mlx5_3` does not appear. Every channel logged goes `via NET/IB/<n>/GDRDMA` on the IB devices, none on the RoCE one. Auto-detection is therefore correct today. Pinning `NCCL_IB_HCA==mlx5_0,mlx5_1,mlx5_4,mlx5_5` would rule out RoCE for good.
-  - vLLM's usage-stats thread raises `OSError: Could not find a suitable TLS CA certificate bundle`, because the host's `REQUESTS_CA_BUNDLE` (a RHEL path) leaks into the Ubuntu container. It is harmless (compute nodes are offline anyway), and `VLLM_NO_USAGE_STATS=1` in the site `[env]` would silence it.
+  - NCCL lists `mlx5_0`, `mlx5_1`, `mlx5_4`, `mlx5_5` as IB and `mlx5_2` as **RoCE**; `mlx5_3` does not appear. Every channel logged goes `via NET/IB/<n>/GDRDMA` on the IB devices, none on the RoCE one. Auto-detection was correct. The site `[env]` now pins `NCCL_IB_HCA="=mlx5_0,mlx5_1,mlx5_4,mlx5_5"` anyway, to rule RoCE out for good (from the next job on).
+  - vLLM's usage-stats thread raises `OSError: Could not find a suitable TLS CA certificate bundle`, because the host's `REQUESTS_CA_BUNDLE` (a RHEL path) leaks into the Ubuntu container. It is harmless (compute nodes are offline anyway); the site `[env]` now sets `VLLM_NO_USAGE_STATS=1`.
 
 ## Control plane on the login node
 

@@ -58,8 +58,12 @@ NCCL_SOCKET_IFNAME = "=ibp63s0"
 NCCL_IB_DISABLE = "0"
 # Resolve VLLM_HOST_IP from this interface instead of `hostname -i`.
 MR_HOST_IFACE = "ibp63s0"
-# NCCL_IB_HCA left to auto-detection on purpose: the node has six mlx5
-# devices but four IB rails (one per GPU), and which two mlx5 are not IB
-# (Ethernet/RoCE, or the .8005 storage VLAN's) is not known yet. Pinning blind
-# risks dropping a rail. Check `ibv_devinfo | grep -E 'hca_id|link_layer'` and
-# the NCCL_DEBUG=INFO "NET/IB" line on the first multi-node run; pin then.
+# The four IB rails, one per GPU. From the first multi-node run (job 2793087,
+# NCCL_DEBUG=INFO): NCCL lists mlx5_0, mlx5_1, mlx5_4, mlx5_5 as IB, mlx5_2 as
+# RoCE, and mlx5_3 not at all. Auto-detection used only the IB ones, but the
+# pin rules RoCE out for good. "=" means exact names, not prefixes.
+NCCL_IB_HCA = "=mlx5_0,mlx5_1,mlx5_4,mlx5_5"
+# vLLM's usage-stats thread posts to a public server: pointless offline, and it
+# raises OSError because the host's REQUESTS_CA_BUNDLE (a RHEL path) leaks
+# into the Ubuntu image.
+VLLM_NO_USAGE_STATS = "1"
