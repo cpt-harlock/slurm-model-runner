@@ -96,3 +96,7 @@ extra_args = [
   "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder",
   "--kv-cache-memory-bytes", "15404725044",
 ]
+
+# Pitagora has a single image, vllm.sif, already v0.32.0-cu129 (site [image]).
+[sites.pitagora]
+sif = ""
