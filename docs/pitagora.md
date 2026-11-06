@@ -31,19 +31,32 @@ login node.
 - **`NCCL_IB_HCA`:** left to auto-detection. There are six mlx5 devices for four IB rails, and which two are not IB is not known yet.
 - **Kimi-K3:** `[sites.pitagora]` in its TOML sets 6 nodes and PP6. That gives about 61 GiB of weights per GPU and about 15 GiB KV headroom at 0.85.
 
+## Done (2026-11-06)
+
+- **Image** `$SCRATCH/model-runner/containers/vllm.sif`: vllm 0.32.0, torch 2.13.0+cu129, ray 2.60.0; `torch.cuda` matmul OK on an H100.
+  `scripts/build-container.sh` does **not** work end to end here yet:
+  - Login nodes have `max_user_namespaces=0` and no `starter-suid`, so `singularity exec` cannot run there at all. The `docker://` pull works; the `pip install ray` step does not.
+  - What worked: pull straight to a SIF on the login node (`singularity build x.sif docker://vllm/vllm-openai:<tag>`, temp dir on `/scratch_local`); `pip download` the `ray[default]` wheels for cp312 on the login node; then, in a compute-node job, unpack the SIF to a sandbox on node-local disk (`--gres=tmpfs:200g`), `pip install --no-index` the wheels, remove `torchcodec`, repack. That job took 3.5 minutes.
+  - Keep the sandbox off Lustre: copying a 25 GB sandbox back off `$SCRATCH` ran at about 0.25 GB/min.
+  - Installing ray 2.60 upgrades opentelemetry to 1.45, which conflicts on paper with `lmcache` and the OTLP exporters. vLLM imports and serves fine.
+- **Weights:** `mrctl stage qwen3-32b`, 61 GB in a few minutes. `hf` is not installed on Pitagora; it was installed with `pip install --user huggingface_hub`.
+- **Single node:** `mrctl up qwen3-32b` (job 2791349) reached `ready`. Weights load in 14.6 s, KV cache is 591k tokens. A real completion and a real `auto` tool call both work.
+- **FlashInfer sampler** works on H100 without the A100 workaround: the first sampled token did not crash.
+
+## Bring-up jobs: `system` partition, `maint_hpcmd` reservation
+
+The site profile submits to the hidden staff partition `system` on the `maint_hpcmd` reservation (4 Booster nodes, `r309c01s[01-04]`). The public partitions have partition-QoS group caps (`boost_fua_dbg` 2 nodes, `boost_fua_prod` 158) that left jobs on `QOSGrpNodeLimit` even inside the reservation. kimi-k3 (6 nodes) does not fit and stays on `boost_fua_prod`. Go back to `boost_fua_prod` with no reservation for production.
+
+`squeue` hides jobs in hidden partitions unless it gets `-a`. `mr.slurm` now passes it. Without it, `mrctl status` deleted the record of a running backend.
+
 ## Not done yet, in order
 
-1. **Build the image** on a login node:
-   ```
-   MR_SITE=pitagora ./scripts/build-container.sh
-   ```
-   This produces `$SCRATCH/model-runner/containers/vllm.sif`.
-2. **Stage weights:** `mrctl stage qwen3-32b`.
-3. **Single-node bring-up:** `mrctl up qwen3-32b`, then a real completion and a real tool call.
-4. **First multi-node bring-up** with `NCCL_DEBUG=INFO`:
+1. **Make `build-container.sh` work here**: split it into a login-node part (pull, wheel download) and a compute-node part (install, repack), as described above.
+2. **First multi-node bring-up** with `NCCL_DEBUG=INFO`, for example qwen3-coder-480b-awq (2 nodes):
    - Read the `NET/IB` line and pin `NCCL_IB_HCA` if NCCL picks a non-IB device.
    - `ibv_devinfo | grep -E 'hca_id|link_layer'` tells which mlx5 are IB.
-5. **Before production:**
+3. **Before production:**
    - The walltime cap is 24 h (`boost_fua_prod`, QoS `normal`), so the handoff to a successor job happens every day, not rarely.
    - Fix first the handoff-path risks in `docs/study-guide.md` §7. These are R1 (every handoff launches one extra job), R13 (an empty EndTime gives a deadline in the past) and R18 (a late successor leaves a gap).
    - Also fix R4 first: nothing restarts the control plane (gateway and supervisor).
+   - R12 was hit today: after `scancel`, the heartbeat recreated the evicted record, and `mrctl up` refused until `status` swept it. The `ready` publish writes only `state` and `ready_at`, so a lost `loading` record becomes a "ready" backend with port 0 and no deadline.
