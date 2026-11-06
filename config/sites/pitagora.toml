@@ -6,6 +6,8 @@
 # compute capability 9.0, driver 580.178.04. 64 cores, 512 GiB RAM, ConnectX-7
 # NDR200 with GPUDirect RDMA on (mlx5_0..mlx5_5; four IB netdevs ibp63s0,
 # ibp82s0, ibp209s0, ibp227s0 -- only ibp63s0 carries an IPv4 address).
+# Login nodes reach a compute node's ports while a job runs there (as on
+# Leonardo), so the gateway proxies straight to the backend, no tunnel.
 # Node-local /tmp is a 10 GB NVMe: too small for weights, ignore it.
 # Apptainer 1.4.5 (`singularity` is an alias for it). Login nodes have
 # internet; 2FA required.
