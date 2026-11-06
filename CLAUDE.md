@@ -13,3 +13,7 @@ API accessible through Claude Code or Avante neovim plugin
 
 - Compute nodes (where jobs are run) are not accessible through the Internet, so the API endpoint must be run on login nodes (e.g. through reverse proxy)
 - Jobs are killed due to wall time, so there should be a way to automatically restart the jobs when needed
+
+## 4. Sites
+
+Cluster specifics live in `config/sites/<MR_SITE>.toml` (default `leonardo`). Porting status and next steps for Pitagora (H100): `docs/pitagora.md` -- read it first when working there.
