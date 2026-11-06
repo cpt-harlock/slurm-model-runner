@@ -21,7 +21,7 @@ import subprocess
 import threading
 import time
 
-from . import config, demand, registry, slurm
+from . import config, demand, failures, registry, slurm
 
 log = logging.getLogger("mr.gateway")
 
@@ -207,6 +207,12 @@ def _wake_eta_message(model: str) -> str:
     try:
         m = config.load(model)
         now = time.time()
+        f = failures.get(model)
+        if f.blocked:
+            # Crash backoff (mr.failures): no start is coming, say so instead
+            # of promising one. Only an operator's `mrctl up` lifts it.
+            return (f"not starting: {f.consecutive} failed bring-ups in a row "
+                    f"(last: {f.last_error}); an operator must run `mrctl up {model}`")
         live = {j.job_id: j for j in slurm.jobs() if j.name == f"mr-{model}"}
         backends = [b for b in registry.for_model(model, include_stale=True) if b.job_id in live]
         load_s = m.measured_load_s or 300

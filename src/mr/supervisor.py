@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from . import config, demand, registry, slurm
+from . import config, demand, failures, registry, slurm
 
 log = logging.getLogger("mr.supervisor")
 
@@ -35,7 +35,7 @@ DRAIN_GRACE_S = 300
 
 @dataclass
 class Decision:
-    action: str  # "none" | "launch" | "launch_successor" | "start_drain" | "cancel" | "reap_idle"
+    action: str  # "none" | "launch" | "launch_successor" | "start_drain" | "cancel" | "reap_idle" | "blocked"
     model: str
     reason: str
     job_id: str = ""
@@ -124,16 +124,29 @@ def decide(model: str, desired: int, now: float | None = None) -> list[Decision]
         out += [Decision("cancel", model, "desired=0", job_id) for job_id in pending_ids]
         return out or [Decision("none", model, "steady state")]
 
+    # Crash backoff (study-guide R5): after MAX_CONSECUTIVE failed bring-ups
+    # in a row, launch nothing -- neither a cold start nor a successor --
+    # until a human runs `mrctl up`. Draining and reaping above/below still
+    # apply. Checked here, not via desired=0, because the gateway's waker
+    # resets desired on every request (see mr.failures).
+    f = failures.get(model)
+    blocked = f.blocked
+
     # Nothing at all and nothing coming -> cold start. A draining backend
     # doesn't count -- it's on its way out, not available to serve.
     if not ready and not pending_ids:
-        out.append(Decision("launch", model, "no backend and none pending"))
+        if blocked:
+            out.append(Decision("blocked", model,
+                                f"{f.consecutive} failed bring-ups in a row, last job {f.last_job}: "
+                                f"{f.last_error}; `mrctl up {model}` to retry"))
+        else:
+            out.append(Decision("launch", model, "no backend and none pending"))
         return out
 
     # Walltime handoff: a successor must be in flight before the incumbent's wall.
     # handoff_lead_s must exceed measured load time; see architecture.md §4/§6.
     for b in ready:
-        if b.seconds_left(now) < m.handoff_lead_s and not pending_ids:
+        if b.seconds_left(now) < m.handoff_lead_s and not pending_ids and not blocked:
             out.append(Decision("launch_successor", model,
                                 f"{int(b.seconds_left(now) / 60)}m of walltime left", b.job_id))
 
@@ -205,13 +218,15 @@ def apply(d: Decision) -> None:
         log.info("cancel %s (%s: %s)", d.job_id, d.action, d.reason)
         slurm.cancel(d.job_id)
         demand.set_desired(d.model, 0)
+    elif d.action == "blocked":
+        log.warning("not launching %s: %s", d.model, d.reason)
     elif d.action == "cancel":
         log.info("cancel %s (%s: %s)", d.job_id, d.action, d.reason)
         slurm.cancel(d.job_id)
     elif d.action in ("launch", "launch_successor"):
         from .cli import cmd_up
         log.info("launch for %s (%s)", d.model, d.reason)
-        cmd_up(type("A", (), {"model": d.model, "force": True})())
+        cmd_up(type("A", (), {"model": d.model, "force": True, "auto": True})())
 
 
 def run(models: list[str]) -> None:

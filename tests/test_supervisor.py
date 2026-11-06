@@ -12,7 +12,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from mr import config, registry, slurm, supervisor
+from mr import config, failures, registry, slurm, supervisor
 
 MODEL = "qwen3-32b"
 JOB_NAME = f"mr-{MODEL}"
@@ -51,6 +51,11 @@ class DecideTest(unittest.TestCase):
         patcher = patch.object(supervisor.config, "load", return_value=self._spec)
         self.addCleanup(patcher.stop)
         patcher.start()
+        # Never read the live failures dir from a unit test.
+        self.failures = failures.Failures()
+        fp = patch.object(supervisor.failures, "get", side_effect=lambda _m: self.failures)
+        self.addCleanup(fp.stop)
+        fp.start()
 
     def decide(self, backends: list[registry.Backend], jobs: list[slurm.Job], desired: int = 1):
         with patch.object(supervisor.slurm, "jobs", return_value=jobs), \
@@ -173,6 +178,83 @@ class ApplyTest(unittest.TestCase):
             supervisor.apply(supervisor.Decision("cancel", MODEL, "drain grace expired", "1"))
         cancel.assert_called_once_with("1")
         set_desired.assert_not_called()
+
+
+class CrashBackoffTest(DecideTest):
+    """R5: stop relaunching a model whose bring-ups keep failing."""
+
+    def block(self):
+        self.failures = failures.Failures(consecutive=failures.MAX_CONSECUTIVE,
+                                          last_error="readiness timeout", last_job="9")
+
+    def test_below_threshold_still_launches(self):
+        self.failures = failures.Failures(consecutive=failures.MAX_CONSECUTIVE - 1)
+        self.assertEqual([d.action for d in self.decide([], [])], ["launch"])
+
+    def test_blocked_model_is_not_cold_started(self):
+        self.block()
+        out = self.decide([], [])
+        self.assertEqual([d.action for d in out], ["blocked"])
+        self.assertIn("mrctl up", out[0].reason)
+
+    def test_blocked_model_gets_no_successor(self):
+        self.block()
+        b = make_backend("1", registry.READY, now=self.now, ready_at=self.now - 100,
+                          expires_at=self.now + self._spec.handoff_lead_s - 10,
+                          last_active_at=self.now)
+        out = self.decide([b], [make_job("1")])
+        self.assertNotIn("launch_successor", {d.action for d in out})
+
+    def test_blocked_model_can_still_be_reaped_and_drained(self):
+        self.block()
+        b = make_backend("1", registry.READY, now=self.now, ready_at=self.now - 100_000,
+                          expires_at=self.now + 100_000,
+                          last_active_at=self.now - self._spec.idle_timeout_s - 1)
+        self.assertEqual([d.action for d in self.decide([b], [make_job("1")])], ["reap_idle"])
+        self.assertEqual([d.action for d in self.decide([b], [make_job("1")], desired=0)],
+                         ["start_drain"])
+
+
+class FailuresStoreTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        p = patch.object(failures, "FAILURES_DIR", __import__("pathlib").Path(self.tmp.name))
+        self.addCleanup(p.stop)
+        p.start()
+
+    def test_record_counts_up_and_reset_clears(self):
+        self.assertEqual(failures.get("m").consecutive, 0)
+        for i in range(1, failures.MAX_CONSECUTIVE + 1):
+            f = failures.record("m", str(i), "boom")
+        self.assertTrue(f.blocked)
+        self.assertEqual((failures.get("m").last_job, failures.get("m").last_error), ("3", "boom"))
+        failures.reset("m")
+        self.assertFalse(failures.get("m").blocked)
+        failures.reset("m")  # idempotent
+
+    def test_manual_up_resets_but_supervisor_launch_does_not(self):
+        import tempfile
+        from pathlib import Path
+        from mr import cli
+        d = Path(tempfile.mkdtemp())
+        (d / "img.sif").touch()
+        spec = config.ModelSpec(name="m", hf_repo="o/M", slurm=config.SlurmSpec(**config.SITE.slurm),
+                                engine=config.EngineSpec(), weights_dir=str(d), sif=str(d / "img.sif"))
+        seen = []
+        with patch.object(cli.config, "load", return_value=spec), \
+             patch.object(cli.registry, "for_model", return_value=[]), \
+             patch.object(cli.demand, "wake"), \
+             patch.object(cli, "_write_spec", return_value=str(d / "spec.json")), \
+             patch.object(cli.slurm, "submit", return_value="123"), \
+             patch.object(cli.slurm, "start_estimate", return_value=None):
+            for auto in (True, False):   # supervisor's launch, then a human's
+                failures.record("m", "1", "boom")
+                cli.cmd_up(type("A", (), {"model": "m", "force": True, "auto": auto})())
+                seen.append(failures.get("m").consecutive)
+        self.assertEqual(seen[0], 1)   # auto: count kept (then +1 below)
+        self.assertEqual(seen[1], 0)   # manual: reset
 
 
 if __name__ == "__main__":

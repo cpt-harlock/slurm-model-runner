@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 
-from . import config, demand, registry, slurm
+from . import config, demand, failures, registry, slurm
 
 JOB_PREFIX = "mr-"
 
@@ -77,6 +77,11 @@ def cmd_up(args) -> int:
     # should override that -- otherwise the supervisor's next tick sees
     # desired=0 and immediately drains what was just launched.
     demand.wake(m.name)
+    # A human asking for it is also the only thing that lifts the crash
+    # backoff (mr.failures); the supervisor's own launches (auto) must not,
+    # or the backoff would never hold.
+    if not getattr(args, "auto", False):
+        failures.reset(m.name)
 
     spec_path = _write_spec(m)
     s = m.slurm
@@ -109,6 +114,12 @@ def cmd_status(args) -> int:
     backends = registry.read_all(include_stale=True)
     if args.model:
         backends = [b for b in backends if b.model == args.model]
+    # Models held back by the crash backoff have no job to show, so say it here.
+    for name in ([args.model] if args.model else config.available()):
+        f = failures.get(name)
+        if f.blocked:
+            print(f"{name}: BLOCKED after {f.consecutive} failed bring-ups "
+                  f"(last job {f.last_job}: {f.last_error}) -- `mrctl up {name}` to retry")
     if not backends and not live:
         print("no backends")
         return 0

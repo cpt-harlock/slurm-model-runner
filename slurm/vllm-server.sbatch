@@ -90,6 +90,20 @@ PY
 }
 export MR_MODEL="$MODEL"
 
+# A failed bring-up: publish it, and count it toward the supervisor's crash
+# backoff (mr.failures, study-guide R5) -- the registry record itself is
+# evicted by the cleanup trap seconds later, so it can't carry the count.
+fail() {
+  publish "state=failed" "error=$1" || true
+  python3 - "$1" <<'PY' || true
+import os, sys
+from mr import failures
+f = failures.record(os.environ["MR_MODEL"], os.environ["SLURM_JOB_ID"], sys.argv[1])
+print(f"bring-up failure {f.consecutive}/{failures.MAX_CONSECUTIVE}: {sys.argv[1]}"
+      + (" -- supervisor stops relaunching; `mrctl up` resets" if f.blocked else ""))
+PY
+}
+
 # EndTime is authoritative for the handoff deadline -- it accounts for whatever
 # the scheduler actually granted, not what we asked for.
 EXPIRES=$(date -d "$(scontrol show job "$JOB_ID" | grep -oP 'EndTime=\K\S+')" +%s)
@@ -171,15 +185,29 @@ SERVER=$!
 # weights. A real completion is the only honest readiness signal.
 # Ceiling is per model (ready_timeout_s in its TOML, default 3600): load time
 # follows weight size and filesystem bandwidth, not a cluster-wide constant.
+IS_READY=0
 for _ in $(seq 1 $(( (READY_TIMEOUT + 14) / 15 ))); do
   if curl -sf "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; then
     publish "state=ready" "ready_at=$(date +%s)"
+    python3 -c "from mr import failures; failures.reset('${MODEL}')" || true
     echo "READY after $SECONDS s"    # <-- Phase 0: this is the load time to measure
+    IS_READY=1
     break
   fi
-  kill -0 $SERVER 2>/dev/null || { publish "state=failed" "error=engine exited during load"; exit 1; }
+  kill -0 $SERVER 2>/dev/null || { fail "engine exited during load"; exit 1; }
   sleep 15
 done
+
+# Deadline missed with the engine still alive (study-guide R6): typically a
+# NCCL/Ray hang at init. Waiting on it would leave the record LOADING until
+# the walltime -- counted as "pending" by the supervisor, so nothing would
+# ever relaunch it while it held the nodes. Fail loudly and give them back;
+# the supervisor relaunches, up to mr.failures.MAX_CONSECUTIVE times.
+if [[ $IS_READY -eq 0 ]]; then
+  fail "readiness timeout: no answer on /v1/models after ${READY_TIMEOUT}s (ready_timeout_s)"
+  kill $SERVER 2>/dev/null || true
+  exit 1
+fi
 
 wait $SERVER
 kill $HEARTBEAT 2>/dev/null || true
