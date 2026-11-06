@@ -52,7 +52,10 @@ def _epoch(v: str) -> float:
 
 def jobs(name_prefix: str = "mr-", user: str | None = None) -> list[Job]:
     fmt = "%i|%j|%T|%N|%S|%e|%r"
-    cmd = ["squeue", "-h", "-o", fmt]
+    # -a: squeue hides jobs in hidden partitions by default (Pitagora's
+    # staff `system` partition). Without it a running backend looks gone and
+    # registry.sweep() deletes its record.
+    cmd = ["squeue", "-a", "-h", "-o", fmt]
     cmd += ["-u", user] if user else ["--me"]
     out = []
     for line in _run(cmd).splitlines():
@@ -91,7 +94,7 @@ def cancel(job_id: str) -> None:
 def start_estimate(job_id: str) -> float:
     """Slurm's predicted start for a pending job, or 0 if it won't say."""
     try:
-        out = _run(["squeue", "-h", "-j", job_id, "-o", "%S"]).strip()
+        out = _run(["squeue", "-a", "-h", "-j", job_id, "-o", "%S"]).strip()
     except RuntimeError:
         return 0.0
     return _epoch(out)
