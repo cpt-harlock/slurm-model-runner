@@ -34,7 +34,14 @@ env = {}
 
 [slurm]
 account = "cin_staff"
-partition = "boost_fua_prod"
+# Bring-up only: the hidden staff partition `system` (AllowAccounts=cin_staff,
+# no partition QoS) on the maint_hpcmd reservation (4 Booster nodes,
+# r309c01s[01-04], until 2027-07-28). boost_fua_prod/dbg carry partition-QoS
+# group node caps (158 / 2 nodes) that kept jobs PENDING on QOSGrpNodeLimit
+# even inside the reservation. Back to partition = "boost_fua_prod" and no
+# reservation for production.
+partition = "system"
+reservation = "maint_hpcmd"
 qos = "normal"                # <=16 nodes per job, 32 per user
 # 24 h walltime cap, no long QoS like Leonardo's boost_qos_lprod: every backend
 # hits its wall daily, so the overlapping handoff (architecture.md §4) is the

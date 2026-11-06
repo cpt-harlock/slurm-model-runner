@@ -87,6 +87,7 @@ class SlurmSpec:
     nodes: int = 1
     cpus_per_task: int = 32
     gpus_per_node: int = 4
+    reservation: str = ""   # passed as --reservation only when set
 
 
 @dataclass

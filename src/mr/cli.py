@@ -95,9 +95,10 @@ def cmd_up(args) -> int:
             "-t", s.time, "-J", f"{JOB_PREFIX}{m.name}",
             "-o", str(config.LOG_DIR / f"{m.name}.%j.out"),
             "-e", str(config.LOG_DIR / f"{m.name}.%j.err"),
-        ],
+        ] + ([f"--reservation={s.reservation}"] if s.reservation else []),
     )
-    print(f"submitted {job_id} for {m.name} ({s.nodes} node(s), {s.qos}, {s.time})")
+    where = f"{s.partition}, {s.qos}" + (f", reservation {s.reservation}" if s.reservation else "")
+    print(f"submitted {job_id} for {m.name} ({s.nodes} node(s), {where}, {s.time})")
     eta = slurm.start_estimate(job_id)
     if eta:
         print(f"  slurm estimates start at {time.strftime('%H:%M', time.localtime(eta))}")

@@ -75,6 +75,10 @@ sif = ""
 
 [sites.pitagora.slurm]
 nodes = 6
+# 6 nodes do not fit the maint_hpcmd reservation (4 Booster nodes) that the
+# site profile uses for bring-up: stay on the regular partition.
+partition = "boost_fua_prod"
+reservation = ""
 
 [sites.pitagora.engine]
 pipeline_parallel_size = 6
