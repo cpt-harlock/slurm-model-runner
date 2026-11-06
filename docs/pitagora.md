@@ -42,6 +42,13 @@ login node.
 - **Weights:** `mrctl stage qwen3-32b`, 61 GB in a few minutes. `hf` is not installed on Pitagora; it was installed with `pip install --user huggingface_hub`.
 - **Single node:** `mrctl up qwen3-32b` (job 2791349) reached `ready`. Weights load in 14.6 s, KV cache is 591k tokens. A real completion and a real `auto` tool call both work.
 - **FlashInfer sampler** works on H100 without the A100 workaround: the first sampled token did not crash.
+- **Multi-node:** `mrctl up qwen3-coder-480b-awq` (job 2793087, 2 nodes, TP4 x PP2, `NCCL_DEBUG=INFO`) reached `ready`. Weights load in about 175 s, KV cache is 485k tokens. A real completion and a real `auto` tool call work, directly and through the gateway.
+  - NCCL lists `mlx5_0`, `mlx5_1`, `mlx5_4`, `mlx5_5` as IB and `mlx5_2` as **RoCE**; `mlx5_3` does not appear. Every channel logged goes `via NET/IB/<n>/GDRDMA` on the IB devices, none on the RoCE one. Auto-detection is therefore correct today. Pinning `NCCL_IB_HCA==mlx5_0,mlx5_1,mlx5_4,mlx5_5` would rule out RoCE for good.
+  - vLLM's usage-stats thread raises `OSError: Could not find a suitable TLS CA certificate bundle`, because the host's `REQUESTS_CA_BUNDLE` (a RHEL path) leaks into the Ubuntu container. It is harmless (compute nodes are offline anyway), and `VLLM_NO_USAGE_STATS=1` in the site `[env]` would silence it.
+
+## Control plane on the login node
+
+Gateway and supervisor run in a dedicated tmux server, `tmux -L mr` (session `mr`, windows `gateway` and `supervise`), started by `$SCRATCH/model-runner/tools/start-control-plane.sh <models>`. It raises `ulimit -t` before tmux starts, because the tmux server inherits the 600 s soft CPU limit. System tmux 3.2a segfaulted twice (13:56 and 14:03 on 2026-11-06), both times with opencode's TUI open inside it, and both times while a 244 GB download kept the user memory cgroup (32 GiB) at its limit (`memory.events max` 7464, `oom` 0). A separate tmux server keeps the control plane alive when the user's tmux dies. Always name the models for `supervise`: with none, every model without a demand file defaults to `desired=1` and is launched.
 
 ## Bring-up jobs: `system` partition, `maint_hpcmd` reservation
 
@@ -52,10 +59,7 @@ The site profile submits to the hidden staff partition `system` on the `maint_hp
 ## Not done yet, in order
 
 1. **Make `build-container.sh` work here**: split it into a login-node part (pull, wheel download) and a compute-node part (install, repack), as described above.
-2. **First multi-node bring-up** with `NCCL_DEBUG=INFO`, for example qwen3-coder-480b-awq (2 nodes):
-   - Read the `NET/IB` line and pin `NCCL_IB_HCA` if NCCL picks a non-IB device.
-   - `ibv_devinfo | grep -E 'hca_id|link_layer'` tells which mlx5 are IB.
-3. **Before production:**
+2. **Before production:**
    - The walltime cap is 24 h (`boost_fua_prod`, QoS `normal`), so the handoff to a successor job happens every day, not rarely.
    - Fix first the handoff-path risks in `docs/study-guide.md` §7. These are R1 (every handoff launches one extra job), R13 (an empty EndTime gives a deadline in the past) and R18 (a late successor leaves a gap).
    - Also fix R4 first: nothing restarts the control plane (gateway and supervisor).
