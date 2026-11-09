@@ -32,8 +32,12 @@ WAKER_PORT = int(os.environ.get("MR_WAKER_PORT", "4100"))
 POLL_S = 15
 
 
-class _Shutdown(Exception):
+class _Shutdown(BaseException):
     """Raised from the SIGTERM handler to unwind run()'s try/finally.
+
+    BaseException, like KeyboardInterrupt: run()'s `except Exception` blocks
+    (around sync_once and the litellm start) must not swallow it, or a SIGTERM
+    that lands during a sync is logged as "sync failed" and ignored.
 
     Python installs no default SIGTERM handler (unlike SIGINT, which raises
     KeyboardInterrupt) -- the OS just kills the process immediately, skipping
@@ -327,24 +331,46 @@ def restart_litellm(proc: subprocess.Popen) -> subprocess.Popen:
     dropped in-flight requests, and only happens when the backend set changes
     (a model going up/down, or a handoff cutover) -- not per request.
     """
-    proc.terminate()
+    if proc is not None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    return ensure_litellm(None)
+
+
+def ensure_litellm(proc: subprocess.Popen | None) -> subprocess.Popen | None:
+    """Return a running litellm: `proc` if it is alive, else a fresh one.
+
+    None when the start itself fails -- the caller keeps polling, so the next
+    tick retries. Before this, a failed restart (2026-11-06: a miniconda
+    reinstall removed the interpreter the LiteLLM venv pointed at, so the exec
+    raised FileNotFoundError) left the gateway running with no proxy and no
+    retry, and a litellm that crashed on its own was never noticed at all:
+    port 4000 stayed closed for three days while the gateway looked healthy.
+    """
+    if proc is not None:
+        if proc.poll() is None:
+            return proc
+        log.error("litellm (pid %d) exited with code %s; restarting", proc.pid, proc.returncode)
     try:
-        proc.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-    return start_litellm()
+        return start_litellm()
+    except Exception:
+        log.exception("litellm failed to start; retrying in %ds", POLL_S)
+        return None
 
 
 def run() -> None:
     """Own the litellm subprocess: launch it, keep its config current, restart
-    it whenever the backend set changes. Runs until killed."""
+    it whenever the backend set changes or it dies. Runs until killed."""
     from .supervisor import raise_cpu_limit
 
     raise_cpu_limit()  # login node RLIMIT_CPU is 600s soft
     signal.signal(signal.SIGTERM, _on_sigterm)
     start_waker()  # daemon thread; dies with the process, no explicit shutdown needed
-    proc = start_litellm()
+    proc = ensure_litellm(None)
     log.info("gateway watching %s", config.REGISTRY_DIR)
     try:
         while True:
@@ -355,10 +381,12 @@ def run() -> None:
                     proc = restart_litellm(proc)
             except Exception:
                 log.exception("sync failed")
+            proc = ensure_litellm(proc)
     except _Shutdown:
         log.info("gateway shutting down")
     finally:
-        proc.terminate()
+        if proc is not None:
+            proc.terminate()
 
 
 def start_litellm() -> subprocess.Popen:

@@ -189,5 +189,46 @@ class WakeEtaTest(unittest.TestCase):
         self.assertTrue(msg)
 
 
+class _FakeProc:
+    def __init__(self, pid: int, returncode: int | None):
+        self.pid, self.returncode = pid, returncode
+
+    def poll(self):
+        return self.returncode
+
+
+class EnsureLitellmTest(unittest.TestCase):
+    """R3: a dead or never-started litellm must be (re)started on the next tick."""
+
+    def test_live_process_is_kept(self):
+        live = _FakeProc(1, None)
+        with patch.object(gateway, "start_litellm") as start:
+            self.assertIs(gateway.ensure_litellm(live), live)
+        start.assert_not_called()
+
+    def test_exited_process_is_replaced(self):
+        new = _FakeProc(2, None)
+        with patch.object(gateway, "start_litellm", return_value=new):
+            self.assertIs(gateway.ensure_litellm(_FakeProc(1, 1)), new)
+
+    def test_failed_start_returns_none_and_next_tick_retries(self):
+        new = _FakeProc(3, None)
+        boom = FileNotFoundError(2, "No such file or directory", "litellm")
+        with patch.object(gateway, "start_litellm", side_effect=[boom, new]):
+            with self.assertLogs("mr.gateway", level="ERROR"):
+                self.assertIsNone(gateway.ensure_litellm(None))
+            self.assertIs(gateway.ensure_litellm(None), new)
+
+    def test_restart_with_no_process_just_starts(self):
+        new = _FakeProc(4, None)
+        with patch.object(gateway, "start_litellm", return_value=new):
+            self.assertIs(gateway.restart_litellm(None), new)
+
+    def test_shutdown_is_not_swallowed(self):
+        with patch.object(gateway, "start_litellm", side_effect=gateway._Shutdown()):
+            with self.assertRaises(gateway._Shutdown):
+                gateway.ensure_litellm(None)
+
+
 if __name__ == "__main__":
     unittest.main()
