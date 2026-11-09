@@ -100,3 +100,4 @@ extra_args = [
 # Pitagora has a single image, vllm.sif, already v0.32.0-cu129 (site [image]).
 [sites.pitagora]
 sif = ""
+measured_load_s = 286   # job 2805732: started_at -> ready_at (2x H100 nodes, weights ~170 s)
