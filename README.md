@@ -54,12 +54,12 @@ tests/
 ## Setup
 
 ```bash
+cd /path/to/slurm-model-runner               # the git checkout; MR_ROOT defaults to it, don't set it
 export MR_SITE=leonardo                      # config/sites/<name>.toml (leonardo | pitagora)
-export MR_ROOT=$HOME/model-runner
 export MR_STATE=$SCRATCH/model-runner       # registry, logs, caches
 # MR_WEIGHTS defaults to the site's `weights` ($FAST/weights on Leonardo)
-export PYTHONPATH=$MR_ROOT/src:$PYTHONPATH
-alias mrctl='python3 -m mr.cli'
+export PYTHONPATH=$PWD/src:$PYTHONPATH
+alias mrctl='python3 -m mr.cli'              # needs Python >= 3.11 (tomllib)
 
 ./scripts/build-container.sh                # login node only; needs internet
 ```
@@ -105,6 +105,36 @@ Adding a new model is a new `config/models/<name>.toml` (see existing ones for t
 Slurm resources, tensor/pipeline parallelism, the tool-call and reasoning parsers vLLM
 needs for that specific model family) plus `mrctl stage` + `mrctl up`.
 
+## Running on Pitagora
+
+Pitagora (H100, 4 GPUs per node) is a second site profile, `config/sites/pitagora.toml`. The
+full state, measurements and open problems are in **[docs/pitagora.md](docs/pitagora.md)**;
+the short version for using it:
+
+```bash
+cd ~/slurm-model-runner
+unset MR_ROOT                                # the default is this checkout
+export MR_SITE=pitagora PYTHONPATH=$PWD/src
+alias mrctl='python3 -m mr.cli'              # any Python >= 3.11
+```
+
+- **Image:** `$SCRATCH/model-runner/containers/vllm.sif` is already built. `scripts/build-container.sh`
+  does not work end to end here: login nodes cannot run `singularity exec`, so the install step has
+  to run in a compute-node job (see the "Done" section of `docs/pitagora.md`).
+- **Weights:** `mrctl stage <model>` on a login node, into `$SCRATCH/weights` (purged, no `$FAST`).
+  Long downloads: run them with `setsid nohup`, not inside your own tmux.
+- **Partition:** bring-up jobs go to the hidden `system` partition on the `maint_hpcmd`
+  reservation; kimi-k3 (6 nodes) stays on `boost_fua_prod`. Plain `squeue` hides `system` jobs: use
+  `squeue -a` (`mrctl status` already does).
+- **Control plane:** gateway and supervisor run on the login node in a dedicated tmux server,
+  started with `$SCRATCH/model-runner/tools/start-control-plane.sh <models>` and attachable with
+  `tmux -L mr attach`. It uses the pinned interpreter `~/.venvs/py312` and sets `ulimit -t unlimited`
+  (login nodes kill processes at 600 CPU-seconds). Always name the models for `supervise`.
+- **Walltime:** 24 h per job, so handoffs are daily; a cluster maintenance window stops backends
+  and a successor cannot start until it ends.
+- **Client config:** `~/.config/opencode/opencode.json` (provider `model-runner`, gateway on
+  `127.0.0.1:4000`); Claude Code uses `ANTHROPIC_BASE_URL=http://127.0.0.1:4000`.
+
 ## Porting to another Slurm cluster
 
 Nothing about the core design — the file-based registry, the reconcile loop, the gateway
@@ -119,7 +149,7 @@ is mostly a config exercise:
 - Point `MR_ROOT`/`MR_STATE` at that cluster's filesystem tiers.
 - Re-derive the container's CUDA/driver tag against the target cluster's actual driver
   version, the same way Leonardo's was pinned. `config/sites/pitagora.toml` is the first
-  such profile, not yet verified on a compute node (its TODOs list what is missing).
+  such profile (see *Running on Pitagora* above).
 
 Two things need re-verifying against the new hardware/filesystem rather than a value swap:
 the `NCCL_IB_HCA` device names in `slurm/vllm-server.sbatch` (Leonardo's actual InfiniBand
