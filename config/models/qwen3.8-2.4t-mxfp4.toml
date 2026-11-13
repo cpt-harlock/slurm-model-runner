@@ -51,3 +51,23 @@ sif = ""                      # the site's single image, vllm.sif (v0.32.0-cu129
 # 6 nodes do not fit the 4-node maint_hpcmd reservation: regular partition.
 partition = "boost_fua_prod"
 reservation = ""
+
+# Leonardo: A100 64 GB, SM80. 1487 GiB / 32 GPUs = ~46.5 GiB per GPU, so all 8
+# nodes (the whole boost_qos_lprod cap) -- ~1 GiB per GPU more than kimi-k3,
+# whose tightest rank had 2.17 GiB left for KV at 0.85 (job 63571100). KV is
+# cheap here (23 full-attention layers, 4 KV heads), but start at 65536 and
+# 0.88 until a real bring-up reports the per-rank KV. Only the routed experts
+# are MXFP4 (quant_method "mxfp4", weight + weight_scale per expert); on SM80
+# that is the MARLIN W4A16 MoE path kimi-k3 proved. The Gated DeltaNet layers
+# use vLLM's Triton (FLA) kernels. Load time: expect kimi-k3's ~6100 s
+# from Lustre, hence the readiness ceiling.
+[sites.leonardo]
+ready_timeout_s = 9000
+
+[sites.leonardo.slurm]
+nodes = 8
+
+[sites.leonardo.engine]
+pipeline_parallel_size = 8
+max_model_len = 65536
+gpu_memory_utilization = 0.88
