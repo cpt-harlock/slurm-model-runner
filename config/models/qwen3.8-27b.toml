@@ -1,0 +1,27 @@
+# Qwen3.8-27B, official BF16 checkpoint (Qwen/Qwen3.8-27B). Dense, same
+# Gated-DeltaNet/attention family as qwen3.8-2.4t-mxfp4. ~54 GiB of weights:
+# fits one H100 node (TP4) with plenty of KV room. Staged only; bring-up and
+# the parser/context settings below are UNTESTED (copied from the 2.4T recipe).
+name = "qwen3.8-27b"
+hf_repo = "Qwen/Qwen3.8-27B"
+weights_dir = "$SCRATCH/weights/Qwen3.8-27B"
+sif = "vllm-0.32.sif"
+
+idle_timeout_s = 1800
+handoff_lead_s = 3600   # placeholder until a real bring-up measures load time
+
+[slurm]                       # account/partition/qos/time: config/sites/
+nodes = 1
+
+[engine]
+tensor_parallel_size = 4
+pipeline_parallel_size = 1
+max_model_len = 131072
+gpu_memory_utilization = 0.85
+extra_args = [
+  "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder",
+  "--reasoning-parser", "qwen3",
+]
+
+[sites.pitagora]
+sif = ""                      # the site's single image, vllm.sif (v0.32.0-cu129)
