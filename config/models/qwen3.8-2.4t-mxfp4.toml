@@ -61,8 +61,15 @@ reservation = ""
 # that is the MARLIN W4A16 MoE path kimi-k3 proved. The Gated DeltaNet layers
 # use vLLM's Triton (FLA) kernels. Load time: expect kimi-k3's ~6100 s
 # from Lustre, hence the readiness ceiling.
+#
+# First bring-up, job 64405012 (2026-11-13, vllm-0.32.sif): READY after 5014 s.
+# 'MARLIN' Mxfp4 MoE backend on every rank; 8.83 GiB KV per rank at 0.88 ->
+# 2,557,628 KV tokens, 39x concurrency at 65536. ~23-27 tok/s single stream.
+# Reasoning and `auto` tool calls work, directly and through the gateway.
+# The KV headroom leaves room to raise max_model_len later (untested).
 [sites.leonardo]
 ready_timeout_s = 9000
+measured_load_s = 5014
 
 [sites.leonardo.slurm]
 nodes = 8
