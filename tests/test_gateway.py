@@ -230,5 +230,26 @@ class EnsureLitellmTest(unittest.TestCase):
                 gateway.ensure_litellm(None)
 
 
+class FindLitellmTest(unittest.TestCase):
+    def test_env_var_wins(self):
+        with patch.dict("os.environ", {"MR_LITELLM": "/x/litellm"}), \
+             patch("os.access", return_value=True):
+            self.assertEqual(gateway.find_litellm(), "/x/litellm")
+
+    def test_path_then_venv_fallback(self):
+        with patch.dict("os.environ", {}, clear=False) as env, \
+             patch("shutil.which", return_value=None), \
+             patch("os.access", side_effect=lambda p, m: p.endswith(".venvs/litellm/bin/litellm")):
+            env.pop("MR_LITELLM", None)
+            self.assertTrue(gateway.find_litellm().endswith(".venvs/litellm/bin/litellm"))
+
+    def test_missing_is_a_clear_error(self):
+        with patch.dict("os.environ", {}, clear=False) as env, \
+             patch("shutil.which", return_value=None), patch("os.access", return_value=False):
+            env.pop("MR_LITELLM", None)
+            with self.assertRaisesRegex(FileNotFoundError, "MR_LITELLM"):
+                gateway.find_litellm()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ import http.server
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -389,11 +390,27 @@ def run() -> None:
             proc.terminate()
 
 
+def find_litellm() -> str:
+    """The litellm executable: $MR_LITELLM, else PATH, else ~/.venvs/litellm/bin.
+
+    The last one is where Pitagora's venv lives; it is rarely on a login
+    shell's PATH, which made `mrctl gateway` fail outside the tmux wrapper.
+    """
+    env = os.environ.get("MR_LITELLM")
+    candidates = [env] if env else [shutil.which("litellm"),
+                                    os.path.expanduser("~/.venvs/litellm/bin/litellm")]
+    for c in candidates:
+        if c and os.access(c, os.X_OK):
+            return c
+    raise FileNotFoundError(
+        "litellm executable not found: put it on PATH or set MR_LITELLM=/path/to/litellm")
+
+
 def start_litellm() -> subprocess.Popen:
-    """Launch the proxy itself. Expects `litellm` on PATH (pipx or a venv)."""
+    """Launch the proxy itself (see find_litellm for where it is looked up)."""
     sync_once()
     proc = subprocess.Popen(
-        ["litellm", "--config", str(CONFIG_PATH), "--port", str(PORT), "--host", "127.0.0.1"],
+        [find_litellm(), "--config", str(CONFIG_PATH), "--port", str(PORT), "--host", "127.0.0.1"],
         stdout=open(config.LOG_DIR / "litellm.out", "ab"),
         stderr=subprocess.STDOUT,
     )
