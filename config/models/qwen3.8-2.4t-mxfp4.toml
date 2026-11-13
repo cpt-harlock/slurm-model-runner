@@ -1,0 +1,53 @@
+# Qwen3.8-2.4T-A95B, MXFP4 checkpoint from Inferact (Qwen/Qwen3.8-2.4T-A95B
+# quantized; 1487 GiB in 92 expert shards + BF16 rest). 92 layers = 23 x
+# (3 Gated DeltaNet + 1 Gated Attention), 512 experts / 10 routed, 95B active,
+# native context 262144. Architecture string is Qwen3_5MoeForCausalLM, i.e. the
+# Qwen3.5 code path that vLLM has had since 0.17; vLLM's own post says Qwen3.8
+# needed no architecture changes. Whether 0.32.0 is new enough is UNTESTED.
+#
+# Why MXFP4 and not NVFP4 (1348 GiB): vLLM's NVFP4 recipe uses
+# `--linear-backend flashinfer_cutedsl`, a Blackwell kernel. kimi-k3.toml's
+# probe showed MXFP4 MoE runs on pre-Blackwell GPUs via the MARLIN W4A16
+# backend, so MXFP4 is the one with a known path on H100. The vLLM post only
+# lists Blackwell (B300) hardware; Hopper is not mentioned anywhere.
+#
+# Size on Pitagora: 1487 GiB / 24 GPUs = ~62 GiB per GPU in 6 nodes (the same
+# footprint as kimi-k3, which it cannot run next to: boost_fua_prod caps a
+# user's nodes). ~15 GiB per GPU left at 0.85 for KV/state; the hybrid layout
+# keeps KV small (only 23 layers have full attention, 4 KV heads).
+#
+# Not enabled yet: MTP speculative decoding from the vLLM recipe
+# (--speculative-config '{"method":"mtp","num_speculative_tokens":3}'). Get a
+# plain bring-up first, then try it as a separate change.
+name = "qwen3.8-2.4t-mxfp4"
+hf_repo = "Inferact/Qwen3.8-2.4T-A95B-MXFP4"
+weights_dir = "$SCRATCH/weights/Qwen3.8-2.4T-A95B-MXFP4"
+sif = "vllm-0.32.sif"
+
+idle_timeout_s = 3600
+handoff_lead_s = 3600   # placeholder until a real bring-up measures load time
+
+[slurm]                       # account/partition/qos/time: config/sites/
+nodes = 6
+
+[engine]
+tensor_parallel_size = 4      # TP within each node, over NVLink
+pipeline_parallel_size = 6    # PP across the 6 nodes, over IB
+# Start at half the native 262144 until a real bring-up reports the KV size.
+max_model_len = 131072
+gpu_memory_utilization = 0.85
+# qwen3_coder tool parser and qwen3 reasoning parser: from the vLLM Qwen3.8
+# recipe. Reasoning is on by default for this family, so the parser matters:
+# without it the thinking text lands in `content`.
+extra_args = [
+  "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder",
+  "--reasoning-parser", "qwen3",
+]
+
+[sites.pitagora]
+sif = ""                      # the site's single image, vllm.sif (v0.32.0-cu129)
+
+[sites.pitagora.slurm]
+# 6 nodes do not fit the 4-node maint_hpcmd reservation: regular partition.
+partition = "boost_fua_prod"
+reservation = ""
