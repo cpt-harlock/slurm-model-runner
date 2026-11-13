@@ -1,7 +1,7 @@
 # Qwen3.8-27B, official BF16 checkpoint (Qwen/Qwen3.8-27B). Dense, same
 # Gated-DeltaNet/attention family as qwen3.8-2.4t-mxfp4. ~54 GiB of weights:
-# fits one H100 node (TP4) with plenty of KV room. Staged only; bring-up and
-# the parser/context settings below are UNTESTED (copied from the 2.4T recipe).
+# fits one H100 node (TP4) with plenty of KV room. First bring-up 2026-11-13 (job 2843821, vllm 0.32.0): completion, reasoning split
+# and an auto tool call all work. Context 131072 is untested beyond that.
 name = "qwen3.8-27b"
 hf_repo = "Qwen/Qwen3.8-27B"
 weights_dir = "$SCRATCH/weights/Qwen3.8-27B"
@@ -25,3 +25,4 @@ extra_args = [
 
 [sites.pitagora]
 sif = ""                      # the site's single image, vllm.sif (v0.32.0-cu129)
+measured_load_s = 226         # job 2843821: READY after 226 s (KV cache 3.96M tokens)
