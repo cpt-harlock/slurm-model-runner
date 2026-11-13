@@ -68,6 +68,10 @@ VLLM_ALLOW_LONG_MAX_MODEL_LEN = "1"
 sif = ""                      # the site's single image, vllm.sif (v0.32.0-cu129)
 
 [sites.pitagora.slurm]
+# 12 h instead of the site's 24 h: a 6-node job waits behind ~600 queued nodes
+# on boost_fua_prod, and a shorter limit fits Slurm's backfill holes sooner.
+# Costs a handoff every 12 h.
+time = "12:00:00"
 # 6 nodes do not fit the 4-node maint_hpcmd reservation: regular partition.
 partition = "boost_fua_prod"
 reservation = ""
