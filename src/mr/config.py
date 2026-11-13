@@ -158,6 +158,10 @@ class ModelSpec:
     # (needed for e.g. DeepSeek-V3.2's sparse attention) can be adopted per
     # model, while proven models stay on the image they were validated with.
     sif: Path = Path()
+    # Extra environment for this model's job, exported after the site [env]
+    # (and overriding it). E.g. VLLM_ALLOW_LONG_MAX_MODEL_LEN for a YaRN-extended
+    # context that vLLM's own length check does not scale.
+    env: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.served_name = self.served_name or self.name
@@ -207,6 +211,7 @@ def load(name: str) -> ModelSpec:
         ready_timeout_s=raw.get("ready_timeout_s", 3600),
         chat_template_kwargs=raw.get("chat_template_kwargs", {}),
         sif=raw.get("sif", ""),
+        env={k: str(v) for k, v in raw.get("env", {}).items()},
         slurm=SlurmSpec(**slurm),
         engine=EngineSpec(**engine),
     )

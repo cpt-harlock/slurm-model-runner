@@ -33,8 +33,8 @@ def _write_spec(m: config.ModelSpec) -> str:
                 "sif": str(m.sif),
                 "state_dir": str(config.MR_STATE),
                 "ready_timeout_s": m.ready_timeout_s,
-                # Site env (NCCL interfaces etc.), exported by the sbatch.
-                "env": config.SITE.env,
+                # Site env (NCCL interfaces etc.) plus the model's own, exported by the sbatch.
+                "env": {**config.SITE.env, **m.env},
                 "engine": {
                     "tensor_parallel_size": m.engine.tensor_parallel_size,
                     "pipeline_parallel_size": m.engine.pipeline_parallel_size,

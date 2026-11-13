@@ -18,7 +18,7 @@ nodes = 1
 [engine]
 tensor_parallel_size = 4      # TP within the node, over NVLink
 pipeline_parallel_size = 1
-max_model_len = 32768
+max_model_len = 131072        # 4x the native 32768 via static YaRN (extra_args below)
 gpu_memory_utilization = 0.90
 # Claude Code is unusable without tool calling -- validate this in Phase 2.
 # No --kv-cache-dtype fp8: A100 is SM 8.0, FP8 needs 8.9+.
@@ -45,7 +45,20 @@ extra_args = [
   "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
   "--reasoning-parser", "qwen3",
   "--kv-cache-memory-bytes", "38745599181",
+  # YaRN (vLLM 0.32 has no --rope-scaling flag; rope_parameters via
+  # --hf-overrides), factor 4 over the native 32768 -> 131072: the Qwen3-32B card's own
+  # recipe, which Qwen validated up to 131072. Static YaRN scales every
+  # request, so short prompts can lose a little quality (the card says so).
+  # Not yet run on this vLLM: check the engine log for the rope settings and a
+  # long-prompt reply before trusting it.
+  "--hf-overrides", '{"rope_parameters":{"rope_type":"yarn","rope_theta":1000000,"factor":4.0,"original_max_position_embeddings":32768}}',
 ]
+
+# vLLM's length check ignores the YaRN factor (derived max stays at the config's
+# 40960), so the 131072 above is refused without this. Verified with a ModelConfig
+# probe on 0.32: the override itself is applied (rope_type yarn, factor 4.0).
+[env]
+VLLM_ALLOW_LONG_MAX_MODEL_LEN = "1"
 
 # Pitagora has a single image, vllm.sif, already v0.32.0-cu129 (site [image]).
 [sites.pitagora]

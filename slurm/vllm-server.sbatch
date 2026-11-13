@@ -149,7 +149,10 @@ VLLM_ARGS="--model ${WEIGHTS} \
 
 if [[ "${SLURM_JOB_NUM_NODES}" -eq 1 ]]; then
   export VLLM_HOST_IP="$(host_ip)"
-  $SING vllm serve $VLLM_ARGS &
+  # eval, not word-splitting: extra_args_str is shlex-quoted, so an argument
+  # holding JSON (--rope-scaling '{...}') only survives if the shell parses
+  # the quotes. The multi-node worker script below gets this for free.
+  eval "$SING vllm serve $VLLM_ARGS" &
 else
   # Phase 4. `ray symmetric-run` launches the identical entrypoint on every node
   # and handles head/worker election itself -- no manual `ray start --head` dance.
