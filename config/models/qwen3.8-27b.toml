@@ -9,6 +9,12 @@ sif = "vllm-0.32.sif"
 
 idle_timeout_s = 1800
 handoff_lead_s = 3600   # placeholder until a real bring-up measures load time
+# Leonardo (A100, job 64401851, 2026-11-13): READY after 633 s -- weights in
+# 17 s, the rest a first-time torch.compile (cached for later runs). KV cache
+# 2,039,148 tokens (15.56x at 131072). Completion, reasoning split and an auto
+# tool call all work, directly and through the gateway; ~60 tok/s single-stream.
+# The Gated DeltaNet Triton kernels run on SM80.
+measured_load_s = 633
 
 [slurm]                       # account/partition/qos/time: config/sites/
 nodes = 1
