@@ -1,3 +1,4 @@
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -44,7 +45,10 @@ class SiteTest(unittest.TestCase):
         for name in config.available():
             m = config.load(name)
             self.assertEqual(m.slurm.account, config.SITE.slurm["account"], name)
-            self.assertEqual(m.slurm.time, config.SITE.slurm["time"], name)
+            raw = tomllib.loads((config.MODELS_DIR / f"{name}.toml").read_text())
+            own = {**raw.get("slurm", {}), **raw.get("sites", {}).get(config.MR_SITE, {}).get("slurm", {})}
+            if "time" not in own:   # a model may set its own wall time on purpose
+                self.assertEqual(m.slurm.time, config.SITE.slurm["time"], name)
 
 
 class PerSiteOverrideTest(unittest.TestCase):
@@ -110,5 +114,24 @@ class WeightsDirTest(unittest.TestCase):
         self.assertEqual(m.weights_dir, config.MR_WEIGHTS / "X")
 
 
+class JobNameTest(unittest.TestCase):
+    def test_anonymous_and_stable(self):
+        n = config.job_name("qwen3-32b")
+        self.assertEqual(n, config.job_name("qwen3-32b"))
+        self.assertNotEqual(n, config.job_name("qwen3-coder-480b-awq"))
+        self.assertNotIn("qwen", n)
+        self.assertNotIn("mr", n)
+
+    def test_old_names_still_recognized(self):
+        self.assertIn("mr-qwen3-32b", config.job_names("qwen3-32b"))
+        self.assertIn(config.job_name("qwen3-32b"), config.job_names("qwen3-32b"))
+
+    def test_reverse_lookup(self):
+        self.assertEqual(config.model_for_job_name(config.job_name("qwen3-32b")), "qwen3-32b")
+        self.assertEqual(config.model_for_job_name("mr-qwen3-32b"), "qwen3-32b")
+        self.assertEqual(config.model_for_job_name("unrelated"), "unrelated")
+
+
 if __name__ == "__main__":
     unittest.main()
+

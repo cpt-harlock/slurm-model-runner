@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import config
+
 LIVE_STATES = {"PENDING", "CONFIGURING", "RUNNING", "COMPLETING", "SUSPENDED"}
 
 
@@ -50,7 +52,9 @@ def _epoch(v: str) -> float:
         return 0.0
 
 
-def jobs(name_prefix: str = "mr-", user: str | None = None) -> list[Job]:
+def jobs(names: set[str] | None = None, user: str | None = None) -> list[Job]:
+    """This user's jobs whose name is one of `names` (default: any model's job name)."""
+    names = config.all_job_names() if names is None else names
     fmt = "%i|%j|%T|%N|%S|%e|%r"
     # -a: squeue hides jobs in hidden partitions by default (Pitagora's
     # staff `system` partition). Without it a running backend looks gone and
@@ -60,7 +64,7 @@ def jobs(name_prefix: str = "mr-", user: str | None = None) -> list[Job]:
     out = []
     for line in _run(cmd).splitlines():
         parts = line.split("|")
-        if len(parts) < 7 or not parts[1].startswith(name_prefix):
+        if len(parts) < 7 or parts[1] not in names:
             continue
         out.append(
             Job(

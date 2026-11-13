@@ -303,7 +303,7 @@ def _wake_eta_message(model: str) -> str:
             # of promising one. Only an operator's `mrctl up` lifts it.
             return (f"not starting: {f.consecutive} failed bring-ups in a row "
                     f"(last: {f.last_error}); an operator must run `mrctl up {model}`")
-        live = {j.job_id: j for j in slurm.jobs() if j.name == f"mr-{model}"}
+        live = {j.job_id: j for j in slurm.jobs() if j.name in config.job_names(model)}
         backends = [b for b in registry.for_model(model, include_stale=True) if b.job_id in live]
         load_s = m.measured_load_s or 300
 

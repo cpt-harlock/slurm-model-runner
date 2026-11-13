@@ -18,7 +18,6 @@ import time
 
 from . import config, demand, failures, registry, slurm
 
-JOB_PREFIX = "mr-"
 
 
 def _write_spec(m: config.ModelSpec) -> str:
@@ -92,9 +91,9 @@ def cmd_up(args) -> int:
             "-A", s.account, "-p", s.partition, f"--qos={s.qos}",
             "-N", str(s.nodes), "--ntasks-per-node=1",
             "-c", str(s.cpus_per_task), f"--gres=gpu:{s.gpus_per_node}",
-            "-t", s.time, "-J", f"{JOB_PREFIX}{m.name}",
-            "-o", str(config.LOG_DIR / f"{m.name}.%j.out"),
-            "-e", str(config.LOG_DIR / f"{m.name}.%j.err"),
+            "-t", s.time, "-J", config.job_name(m.name),
+            "-o", str(config.LOG_DIR / f"{config.job_name(m.name)}.%j.out"),
+            "-e", str(config.LOG_DIR / f"{config.job_name(m.name)}.%j.err"),
         ] + ([f"--reservation={s.reservation}"] if s.reservation else [])
           # A node that broke a bring-up (2026-11-14: srun "Communication
           # connection failure" on one node, a Ray worker that never joined on
@@ -106,12 +105,12 @@ def cmd_up(args) -> int:
     eta = slurm.start_estimate(job_id)
     if eta:
         print(f"  slurm estimates start at {time.strftime('%H:%M', time.localtime(eta))}")
-    print(f"  logs: {config.LOG_DIR}/{m.name}.{job_id}.out")
+    print(f"  logs: {config.LOG_DIR}/{config.job_name(m.name)}.{job_id}.out")
     return 0
 
 
 def cmd_status(args) -> int:
-    live = {j.job_id: j for j in slurm.jobs(JOB_PREFIX)}
+    live = {j.job_id: j for j in slurm.jobs()}
     removed = registry.sweep(set(live))
     for b in removed:
         print(f"[swept stale record {b.model}/{b.job_id}]", file=sys.stderr)
@@ -145,7 +144,7 @@ def cmd_status(args) -> int:
     # Jobs Slurm knows about that have not yet written a record (still QUEUED).
     for jid, j in live.items():
         if not any(b.job_id == jid for b in backends):
-            print(f"{j.name.removeprefix(JOB_PREFIX):<22} {jid:<10} {'-':<9} {j.state:<11} "
+            print(f"{config.model_for_job_name(j.name):<22} {jid:<10} {'-':<9} {j.state:<11} "
                   f"{'-':<24} {'-':>10}   ({j.reason})")
     return 0
 
@@ -160,10 +159,9 @@ def cmd_down(args) -> int:
         registry.evict(b.model, b.job_id)
         print(f"cancelled {b.job_id}")
         n += 1
-    for j in slurm.jobs(JOB_PREFIX):
-        if j.name == f"{JOB_PREFIX}{args.model}":
-            slurm.cancel(j.job_id)
-            n += 1
+    for j in slurm.jobs(config.job_names(args.model)):
+        slurm.cancel(j.job_id)
+        n += 1
     if not n:
         print(f"nothing running for {args.model}")
     return 0

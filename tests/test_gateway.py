@@ -21,10 +21,10 @@ from unittest.mock import patch
 
 from pathlib import Path
 
-from mr import gateway, litellm_hooks, registry, slurm
+from mr import config, gateway, litellm_hooks, registry, slurm
 
 MODEL = "qwen3-32b"
-JOB_NAME = f"mr-{MODEL}"
+JOB_NAME = config.job_name(MODEL)
 
 
 def make_job(job_id: str, state: str) -> slurm.Job:

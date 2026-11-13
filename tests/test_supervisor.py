@@ -15,7 +15,7 @@ from unittest.mock import patch
 from mr import config, failures, registry, slurm, supervisor
 
 MODEL = "qwen3-32b"
-JOB_NAME = f"mr-{MODEL}"
+JOB_NAME = config.job_name(MODEL)
 
 
 def make_spec(handoff_lead_s: int = 3000, idle_timeout_s: int = 1800) -> config.ModelSpec:

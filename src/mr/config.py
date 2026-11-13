@@ -7,7 +7,9 @@ have to live elsewhere or jobs fail in confusing ways.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import secrets
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -225,6 +227,44 @@ def load(name: str) -> ModelSpec:
 
 def available() -> list[str]:
     return sorted(p.stem for p in MODELS_DIR.glob("*.toml"))
+
+
+def _job_salt() -> str:
+    """Per-install secret, so a job name cannot be reversed by hashing model names."""
+    p = MR_STATE / ".job-salt"
+    try:
+        return p.read_text().strip()
+    except FileNotFoundError:
+        MR_STATE.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(p, "x") as f:
+                f.write(secrets.token_hex(16))
+            p.chmod(0o600)
+        except FileExistsError:
+            pass
+        return p.read_text().strip()
+
+
+def job_name(model: str) -> str:
+    """The Slurm job name for a model: stable, anonymous (no tool or model name in it)."""
+    return "j" + hashlib.sha256(f"{_job_salt()}:{model}".encode()).hexdigest()[:9]
+
+
+def job_names(model: str) -> set[str]:
+    """Every name a model's job may carry: the anonymous one, and the old `mr-<model>`
+    that jobs submitted before the change still have."""
+    return {job_name(model), f"mr-{model}"}
+
+
+def all_job_names() -> set[str]:
+    return {n for m in available() for n in job_names(m)}
+
+
+def model_for_job_name(name: str) -> str:
+    for m in available():
+        if name in job_names(m):
+            return m
+    return name
 
 
 def ensure_dirs() -> None:

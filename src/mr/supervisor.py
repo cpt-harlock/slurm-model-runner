@@ -92,7 +92,7 @@ def decide(model: str, desired: int, now: float | None = None) -> list[Decision]
     """
     now = now or time.time()
     m = config.load(model)
-    live = {j.job_id for j in slurm.jobs() if j.name == f"mr-{model}"}
+    live = {j.job_id for j in slurm.jobs() if j.name in config.job_names(model)}
     backends = [b for b in registry.for_model(model, include_stale=True) if b.job_id in live]
 
     ready = [b for b in backends if b.state == registry.READY]
