@@ -179,7 +179,12 @@ export VLLM_HOST_IP="\$(host_ip)"
 exec $SING ray symmetric-run --address "${HEAD_NODE}:6379" --min-nodes ${SLURM_JOB_NUM_NODES} -- vllm serve $VLLM_ARGS --distributed-executor-backend ray
 WORKEREOF
   chmod +x "$WORKER_SCRIPT"
-  srun --ntasks-per-node=1 "$WORKER_SCRIPT" &
+  # --kill-on-bad-exit: one task failing (2026-11-14: the Ray head timed out
+  # waiting for a worker that never joined and exited 1) must take the whole
+  # step down. Without it the other tasks' `ray` processes block forever, srun
+  # stays alive, the readiness loop's `kill -0 $SERVER` keeps passing, and the
+  # job holds every node until ready_timeout_s instead of failing in a minute.
+  srun --ntasks-per-node=1 --kill-on-bad-exit=1 "$WORKER_SCRIPT" &
 fi
 SERVER=$!
 

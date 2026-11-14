@@ -95,7 +95,11 @@ def cmd_up(args) -> int:
             "-t", s.time, "-J", f"{JOB_PREFIX}{m.name}",
             "-o", str(config.LOG_DIR / f"{m.name}.%j.out"),
             "-e", str(config.LOG_DIR / f"{m.name}.%j.err"),
-        ] + ([f"--reservation={s.reservation}"] if s.reservation else []),
+        ] + ([f"--reservation={s.reservation}"] if s.reservation else [])
+          # A node that broke a bring-up (2026-11-14: srun "Communication
+          # connection failure" on one node, a Ray worker that never joined on
+          # another) would otherwise be eligible again on the retry.
+          + ([f"--exclude={args.exclude}"] if getattr(args, "exclude", "") else []),
     )
     where = f"{s.partition}, {s.qos}" + (f", reservation {s.reservation}" if s.reservation else "")
     print(f"submitted {job_id} for {m.name} ({s.nodes} node(s), {where}, {s.time})")
@@ -212,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
     up = sub.add_parser("up", help="submit an inference job")
     up.add_argument("model")
     up.add_argument("--force", action="store_true", help="submit even if one is already up")
+    up.add_argument("--exclude", default="", metavar="NODES",
+                    help="Slurm nodelist to keep this job off (e.g. a node that broke the last bring-up)")
     up.set_defaults(fn=cmd_up)
 
     st = sub.add_parser("status", help="show backends")
