@@ -42,7 +42,16 @@ gpu_memory_utilization = 0.85
 extra_args = [
   "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder",
   "--reasoning-parser", "qwen3",
+  # Lifts the config's 262144 ceiling to the 1,010,000 the model card allows
+  # ("262,144 natively and extensible up to 1,010,000"). The vLLM Qwen3.8
+  # recipe ("Processing Ultra-Long Texts") does it this way, no YaRN and no
+  # rope change. Harmless where max_model_len stays below 262144.
+  "--hf-overrides", '{"max_position_embeddings": 1010000}',
 ]
+
+[env]
+# Required by the vLLM recipe for max_model_len above the native 262144.
+VLLM_ALLOW_LONG_MAX_MODEL_LEN = "1"
 
 [sites.pitagora]
 sif = ""                      # the site's single image, vllm.sif (v0.32.0-cu129)
@@ -67,6 +76,11 @@ reservation = ""
 # 2,557,628 KV tokens, 39x concurrency at 65536. ~23-27 tok/s single stream.
 # Reasoning and `auto` tool calls work, directly and through the gateway.
 # The KV headroom leaves room to raise max_model_len later (untested).
+#
+# Next run: max_model_len 1010000, the model card's maximum. 2,557,628 KV tokens
+# at 0.88 hold ~2.5 full-length requests; the Gated DeltaNet state is per
+# sequence, not per token, so it does not grow with the context. UNTESTED:
+# whether a near-1M prefill is usable at this speed on A100 + PP8.
 [sites.leonardo]
 ready_timeout_s = 9000
 measured_load_s = 5014
@@ -76,5 +90,5 @@ nodes = 8
 
 [sites.leonardo.engine]
 pipeline_parallel_size = 8
-max_model_len = 65536
+max_model_len = 1010000
 gpu_memory_utilization = 0.88
