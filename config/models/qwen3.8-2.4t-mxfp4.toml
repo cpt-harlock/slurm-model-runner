@@ -49,6 +49,17 @@ extra_args = [
   "--hf-overrides", '{"max_position_embeddings": 1010000}',
 ]
 
+
+# The chat template accepts only xhigh (default), medium and low and raises on
+# anything else -> HTTP 400. Clients send "high"; LiteLLM turns Claude Code's
+# thinking budgets into "high" (>=4096) or "minimal" (<1024). The gateway's
+# LiteLLM hook (src/mr/litellm_hooks.py) rewrites them with this table.
+[reasoning_effort_map]
+high = "xhigh"
+max = "xhigh"
+minimal = "low"
+none = "low"
+
 [env]
 # Required by the vLLM recipe for max_model_len above the native 262144.
 VLLM_ALLOW_LONG_MAX_MODEL_LEN = "1"

@@ -152,6 +152,11 @@ class ModelSpec:
     # </think> lands in its generated output where the parser can find it --
     # confirmed live: content splits correctly, real reasoning preserved.
     chat_template_kwargs: dict = field(default_factory=dict)
+    # Client reasoning_effort -> the value this model's chat template accepts,
+    # applied by the gateway's LiteLLM hook (mr/litellm_hooks.py). The Qwen3.8
+    # templates take only xhigh/medium/low and raise on the "high" most
+    # clients (and LiteLLM's own thinking-budget translation) send.
+    reasoning_effort_map: dict = field(default_factory=dict)
     # Per-model container image. Empty means the global MR_SIF. A bare file
     # name resolves next to MR_SIF (the containers dir), so a TOML can say
     # sif = "vllm-0.32.sif" without hardcoding $SCRATCH. Exists so a newer vLLM
@@ -210,6 +215,7 @@ def load(name: str) -> ModelSpec:
         measured_load_s=raw.get("measured_load_s", 0),
         ready_timeout_s=raw.get("ready_timeout_s", 3600),
         chat_template_kwargs=raw.get("chat_template_kwargs", {}),
+        reasoning_effort_map={str(k): str(v) for k, v in raw.get("reasoning_effort_map", {}).items()},
         sif=raw.get("sif", ""),
         env={k: str(v) for k, v in raw.get("env", {}).items()},
         slurm=SlurmSpec(**slurm),

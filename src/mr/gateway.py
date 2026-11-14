@@ -21,6 +21,7 @@ import signal
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 from . import config, demand, failures, registry, slurm
 
@@ -87,7 +88,7 @@ def render(model_status: dict[str, registry.Backend | None]) -> str:
     # never true. This alone doesn't guarantee no client can still send an
     # oversized prompt (LiteLLM can't truncate an arbitrary conversation),
     # but it stops the numbers from being actively wrong.
-    max_len_by_model = {m: config.load(m).engine.max_model_len for m in model_status}
+    max_len_by_model = {m: _served_max_len(m, model_status[m]) for m in model_status}
     ctk_by_model = {m: config.load(m).chat_template_kwargs for m in model_status}
 
     def entry(model_name: str, served_name: str, url: str, backend_model: str) -> list[str]:
@@ -149,23 +150,7 @@ def render(model_status: dict[str, registry.Backend | None]) -> str:
     # worked because qwen3-32b was the only model configured. Falls back to
     # that old heuristic if nothing sets `role` explicitly, so a single-model
     # deployment that predates this still works unchanged.
-    models = list(model_status)
-    roles = {m: config.load(m).role for m in models}
-    primary_model = next((m for m in models if roles[m] == "primary"), models[0])
-    small_model = next(
-        (m for m in models if roles[m] == "small"),
-        next((m for m in models if "32b" in m), primary_model),
-    )
-    for pattern, target_model in (
-        ("claude-*sonnet*", primary_model),
-        ("claude-*opus*", primary_model),
-        ("claude-*haiku*", small_model),
-        # Bare short forms too, in case something sends the alias literally
-        # (older CLI versions, ANTHROPIC_MODEL=sonnet-style env overrides).
-        ("sonnet", primary_model),
-        ("opus", primary_model),
-        ("haiku", small_model),
-    ):
+    for pattern, target_model in _alias_targets(list(model_status)):
         served, url, backend_model = route_for(target_model)
         lines += entry(pattern, served, url, backend_model)
 
@@ -177,15 +162,77 @@ def render(model_status: dict[str, registry.Backend | None]) -> str:
                                   # actually clamp an oversized client max_tokens
                                   # instead of just describing the model
         "",
+        # Per-model reasoning_effort rewrite (see mr/litellm_hooks.py); LiteLLM
+        # resolves the module next to this config file, where sync_once puts it.
+        "  callbacks: litellm_hooks.proxy_handler_instance",
+        "",
         "general_settings:",
         "  telemetry: false",
     ]
     return "\n".join(lines) + "\n"
 
 
+def _served_max_len(model: str, backend: registry.Backend | None) -> int:
+    """max_model_len of what is actually serving `model`.
+
+    A live backend runs with the spec `mrctl up` wrote for it, not with
+    whatever the TOML says now: on 2026-11-14 raising qwen3.8-2.4t-mxfp4's
+    TOML to 1010000 for its *next* run made the gateway advertise 757500
+    input tokens for a job started at 65536. Cold models (waker) use the TOML.
+    The spec is per model, so after a successor's `mrctl up` it describes the
+    successor -- the same model, normally the same length.
+    """
+    if backend is not None:
+        try:
+            spec = json.loads((config.SPEC_DIR / f"{model}.json").read_text())
+            return int(spec["engine"]["max_model_len"])
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    return config.load(model).engine.max_model_len
+
+
+def effort_maps(model_status: dict[str, registry.Backend | None]) -> dict[str, dict[str, str]]:
+    """{model_name or alias pattern: reasoning_effort map} for mr/litellm_hooks.
+
+    Keyed by every name a client can send: each served name, plus the claude-*
+    alias patterns, which carry the map of the model they route to."""
+    if not model_status:
+        return {}
+    own = {m: config.load(m).reasoning_effort_map for m in model_status}
+    maps: dict[str, dict[str, str]] = {}
+    for m, b in model_status.items():
+        if isinstance(own[m], dict) and own[m]:
+            maps[b.served_name if b else m] = own[m]
+    for pattern, target in _alias_targets(list(model_status)):
+        if isinstance(own[target], dict) and own[target]:
+            maps[pattern] = own[target]
+    return maps
+
+
+def _alias_targets(models: list[str]) -> list[tuple[str, str]]:
+    """(model_name pattern, configured model) rows for the Claude Code aliases."""
+    roles = {m: config.load(m).role for m in models}
+    primary_model = next((m for m in models if roles[m] == "primary"), models[0])
+    small_model = next(
+        (m for m in models if roles[m] == "small"),
+        next((m for m in models if "32b" in m), primary_model),
+    )
+    return [
+        ("claude-*sonnet*", primary_model),
+        ("claude-*opus*", primary_model),
+        ("claude-*haiku*", small_model),
+        # Bare short forms too, in case something sends the alias literally
+        # (older CLI versions, ANTHROPIC_MODEL=sonnet-style env overrides).
+        ("sonnet", primary_model),
+        ("opus", primary_model),
+        ("haiku", small_model),
+    ]
+
+
 def sync_once() -> bool:
     """Re-render if the active backend set changed. Returns True if it did."""
     model_status = {m: registry.active(m) for m in config.available()}
+    _install_hook(effort_maps(model_status))
     new = render(model_status)
     old = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else ""
     if new == old:
@@ -197,6 +244,30 @@ def sync_once() -> bool:
     os.replace(tmp, CONFIG_PATH)
     log.info("config changed: %s", {m: (b.url if b else "cold") for m, b in model_status.items()})
     return True
+
+
+def _atomic_write(dest, text: str) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(text)
+    os.replace(tmp, dest)
+
+
+def _install_hook(maps: dict[str, dict[str, str]]) -> None:
+    """Put mr/litellm_hooks.py and its JSON map next to the LiteLLM config.
+
+    LiteLLM imports `callbacks` modules from the config file's directory. The
+    hook re-reads the JSON when its mtime changes, so a map change needs no
+    LiteLLM restart; the .py is only rewritten when it differs.
+    """
+    src = (Path(__file__).with_name("litellm_hooks.py")).read_text()
+    py = CONFIG_PATH.with_name("litellm_hooks.py")
+    if not py.exists() or py.read_text() != src:
+        _atomic_write(py, src)
+    js = CONFIG_PATH.with_name("litellm_hooks.json")
+    text = json.dumps(maps, indent=2, sort_keys=True) + "\n"
+    if not js.exists() or js.read_text() != text:
+        _atomic_write(js, text)
 
 
 def _wake_eta_message(model: str) -> str:

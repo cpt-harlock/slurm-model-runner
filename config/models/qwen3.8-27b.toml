@@ -29,6 +29,17 @@ extra_args = [
   "--reasoning-parser", "qwen3",
 ]
 
+
+# The chat template accepts only xhigh (default), medium and low and raises on
+# anything else -> HTTP 400. Clients send "high"; LiteLLM turns Claude Code's
+# thinking budgets into "high" (>=4096) or "minimal" (<1024). The gateway's
+# LiteLLM hook (src/mr/litellm_hooks.py) rewrites them with this table.
+[reasoning_effort_map]
+high = "xhigh"
+max = "xhigh"
+minimal = "low"
+none = "low"
+
 [sites.pitagora]
 sif = ""                      # the site's single image, vllm.sif (v0.32.0-cu129)
 measured_load_s = 226         # job 2843821: READY after 226 s (KV cache 3.96M tokens)

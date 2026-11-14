@@ -11,12 +11,17 @@ from __future__ import annotations
 
 import http.client
 import http.server
+import json
+import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
-from mr import gateway, registry, slurm
+from pathlib import Path
+
+from mr import gateway, litellm_hooks, registry, slurm
 
 MODEL = "qwen3-32b"
 JOB_NAME = f"mr-{MODEL}"
@@ -28,6 +33,14 @@ def make_job(job_id: str, state: str) -> slurm.Job:
 
 
 class RenderTest(unittest.TestCase):
+    def setUp(self):
+        # render() reads the live spec for active backends; never the real one.
+        self._tmp = tempfile.TemporaryDirectory()
+        p = patch("mr.config.SPEC_DIR", Path(self._tmp.name))
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self._tmp.cleanup)
+
     def test_empty_status_is_empty_list(self):
         self.assertIn("model_list: []", gateway.render({}))
 
@@ -113,6 +126,106 @@ class RenderTest(unittest.TestCase):
         self.assertIn("h1:8001", blocks["claude-*haiku*"])
 
 
+class ServedMaxLenTest(unittest.TestCase):
+    """2026-11-14: a TOML raised to 1010000 for the next run made the gateway
+    advertise 757500 input tokens for a job serving 65536."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.spec_dir = Path(self._tmp.name)
+        p = patch("mr.config.SPEC_DIR", self.spec_dir)
+        p.start()
+        self.addCleanup(p.stop)
+        (self.spec_dir / "m.json").write_text(json.dumps({"engine": {"max_model_len": 65536}}))
+        self.b = registry.Backend(model="m", served_name="m", job_id="1",
+                                  state=registry.READY, host="h", port=1)
+
+    def test_live_backend_uses_its_spec_not_the_toml(self):
+        with patch("mr.config.load") as load:
+            load.return_value.engine.max_model_len = 1010000
+            self.assertEqual(gateway._served_max_len("m", self.b), 65536)
+
+    def test_cold_model_uses_the_toml(self):
+        with patch("mr.config.load") as load:
+            load.return_value.engine.max_model_len = 1010000
+            self.assertEqual(gateway._served_max_len("m", None), 1010000)
+
+    def test_missing_spec_falls_back_to_the_toml(self):
+        (self.spec_dir / "m.json").unlink()
+        with patch("mr.config.load") as load:
+            load.return_value.engine.max_model_len = 1010000
+            self.assertEqual(gateway._served_max_len("m", self.b), 1010000)
+
+
+QWEN_MAP = {"high": "xhigh", "max": "xhigh", "minimal": "low", "none": "low"}
+
+
+class EffortHookTest(unittest.TestCase):
+    """mr/litellm_hooks.rewrite. Live 2026-11-14: Anthropic thinking budgets
+    of 6000 and 16000 400'd on qwen3.8-2.4t-mxfp4 (\"Unexpected reasoning
+    effort high\") because LiteLLM buckets them into \"high\"."""
+
+    maps = {"q": QWEN_MAP, "claude-*sonnet*": QWEN_MAP}
+
+    def rw(self, **data):
+        return litellm_hooks.rewrite(dict(data), self.maps)
+
+    def test_high_becomes_xhigh(self):
+        self.assertEqual(self.rw(model="q", reasoning_effort="high")["reasoning_effort"], "xhigh")
+
+    def test_accepted_value_passes_through(self):
+        self.assertEqual(self.rw(model="q", reasoning_effort="medium")["reasoning_effort"], "medium")
+
+    def test_large_thinking_budget_maps_to_xhigh(self):
+        out = self.rw(model="q", thinking={"type": "enabled", "budget_tokens": 16000})
+        self.assertEqual(out["reasoning_effort"], "xhigh")
+
+    def test_tiny_thinking_budget_maps_minimal_to_low(self):
+        out = self.rw(model="q", thinking={"type": "enabled", "budget_tokens": 500})
+        self.assertEqual(out["reasoning_effort"], "low")
+
+    def test_medium_budget_is_set_explicitly(self):
+        out = self.rw(model="q", thinking={"type": "enabled", "budget_tokens": 3000})
+        self.assertEqual(out["reasoning_effort"], "medium")
+
+    def test_explicit_effort_wins_over_budget(self):
+        out = self.rw(model="q", reasoning_effort="low", thinking={"type": "enabled", "budget_tokens": 16000})
+        self.assertEqual(out["reasoning_effort"], "low")
+
+    def test_alias_pattern_gets_the_target_map(self):
+        out = self.rw(model="claude-sonnet-5", reasoning_effort="high")
+        self.assertEqual(out["reasoning_effort"], "xhigh")
+
+    def test_unmapped_model_is_untouched(self):
+        data = {"model": "other", "reasoning_effort": "high"}
+        self.assertEqual(litellm_hooks.rewrite(dict(data), self.maps), data)
+
+    def test_no_effort_no_thinking_adds_nothing(self):
+        self.assertNotIn("reasoning_effort", self.rw(model="q"))
+
+    def test_disabled_thinking_adds_nothing(self):
+        self.assertNotIn("reasoning_effort", self.rw(model="q", thinking={"type": "disabled"}))
+
+
+class EffortMapsTest(unittest.TestCase):
+    def test_served_name_and_aliases_carry_the_map(self):
+        specs = {"q": QWEN_MAP, "small": {}}
+
+        def load(name):
+            m = unittest.mock.MagicMock()
+            m.reasoning_effort_map = specs[name]
+            m.role = {"q": "primary", "small": "small"}[name]
+            return m
+
+        with patch("mr.config.load", side_effect=load):
+            maps = gateway.effort_maps({"q": None, "small": None})
+        self.assertEqual(maps["q"], QWEN_MAP)
+        self.assertEqual(maps["claude-*opus*"], QWEN_MAP)
+        self.assertNotIn("small", maps)
+        self.assertNotIn("claude-*haiku*", maps)
+
+
 class WakerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), gateway._WakerHandler)
@@ -120,6 +233,12 @@ class WakerTest(unittest.TestCase):
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.shutdown)
         self.addCleanup(self.server.server_close)
+        # The ETA queries the real squeue, which can take longer than the 5 s
+        # client timeout on a busy login node (seen 2026-11-14); it has its
+        # own tests in WakeEtaTest.
+        p = patch.object(gateway, "_wake_eta_message", return_value="eta")
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_returns_400_not_503(self):
         # The load-bearing assertion: LiteLLM treats 503 as retriable and
