@@ -90,6 +90,16 @@ def render(model_status: dict[str, registry.Backend | None]) -> str:
     # but it stops the numbers from being actively wrong.
     max_len_by_model = {m: _served_max_len(m, model_status[m]) for m in model_status}
     ctk_by_model = {m: config.load(m).chat_template_kwargs for m in model_status}
+    # On /v1/messages LiteLLM "normalizes" reasoning_effort against model_info
+    # (anthropic experimental_pass_through/utils.normalize_reasoning_effort_value):
+    # without supports_xhigh_reasoning_effort it turns xhigh back into high --
+    # which the Qwen3.8 templates reject. Declare it wherever the model's
+    # reasoning_effort_map produces xhigh (live 2026-11-14).
+    xhigh_models = set()
+    for m in model_status:
+        rem = config.load(m).reasoning_effort_map
+        if isinstance(rem, dict) and "xhigh" in rem.values():
+            xhigh_models.add(m)
 
     def entry(model_name: str, served_name: str, url: str, backend_model: str) -> list[str]:
         max_len = max_len_by_model.get(backend_model)
@@ -113,13 +123,17 @@ def render(model_status: dict[str, registry.Backend | None]) -> str:
             for k, v in ctk.items():
                 yaml_v = str(v).lower() if isinstance(v, bool) else v
                 lines.append(f"        {k}: {yaml_v}")
+        info = []
         if max_len:
             max_output = max_len // 4
-            lines += [
-                "    model_info:",
+            info += [
                 f"      max_input_tokens: {max_len - max_output}",
                 f"      max_output_tokens: {max_output}",
             ]
+        if backend_model in xhigh_models:
+            info.append("      supports_xhigh_reasoning_effort: true")
+        if info:
+            lines += ["    model_info:"] + info
         return lines
 
     def route_for(model: str) -> tuple[str, str, str]:

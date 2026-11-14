@@ -13,11 +13,10 @@ raise on anything else, so vLLM answers HTTP 400 to the "high" that most
 clients send. Worse, Claude Code never sends an effort at all: it sends
 Anthropic `thinking.budget_tokens`, and LiteLLM's hosted_vllm transformation
 buckets that into an OpenAI-style effort (>=4096 "high", >=2048 "medium",
->=1024 "low", below that "minimal") -- and only does so when no `reasoning_effort` is
-already set. So for a budget we compute the same bucket ourselves, map it,
-and set `reasoning_effort` first; LiteLLM then leaves it alone. Verified
-live 2026-11-14 on qwen3.8-2.4t-mxfp4: budget 6000 and 16000 both 400'd
-with "Unexpected reasoning effort high" before this hook.
+>=1024 "low", below that "minimal"). See rewrite() for how each request format is
+handled. Verified live 2026-11-14 on qwen3.8-2.4t-mxfp4: Anthropic budgets
+6000 and 16000 both 400'd with "Unexpected reasoning effort high" before
+this hook.
 """
 
 from __future__ import annotations
@@ -60,16 +59,41 @@ def map_for(model: str, maps: dict[str, dict[str, str]]) -> dict[str, str]:
     return {}
 
 
-def rewrite(data: dict, maps: dict[str, dict[str, str]]) -> dict:
-    """Return `data` with reasoning_effort mapped for its model (in place)."""
+def rewrite(data: dict, maps: dict[str, dict[str, str]], anthropic: bool = False) -> dict:
+    """Return `data` with the reasoning effort mapped for its model (in place).
+
+    OpenAI-format requests: set `reasoning_effort`; hosted_vllm then skips its
+    own thinking-budget translation. Anthropic /v1/messages requests: the
+    messages adapter ignores a top-level reasoning_effort and recomputes it
+    from `thinking`, except for `thinking.type == "adaptive"`, where it takes
+    `output_config.effort` -- so rewrite the request into that shape.
+    """
     effort_map = map_for(str(data.get("model", "")), maps)
     if not effort_map:
         return data
-    effort = data.get("reasoning_effort")
-    if effort is None:
-        thinking = data.get("thinking")
-        if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+    thinking = data.get("thinking")
+    if anthropic:
+        if not isinstance(thinking, dict):
+            return data
+        kind = thinking.get("type")
+        output_config = data.get("output_config") if isinstance(data.get("output_config"), dict) else {}
+        if kind == "enabled":
             effort = effort_from_budget(int(thinking.get("budget_tokens") or 0))
+        elif kind == "adaptive":
+            effort = output_config.get("effort") or "medium"
+        elif kind == "disabled":
+            effort = "none"  # what the adapter would send; may be unsupported
+        else:
+            return data
+        new_thinking = {"type": "adaptive"}
+        if thinking.get("summary"):
+            new_thinking["summary"] = thinking["summary"]
+        data["thinking"] = new_thinking
+        data["output_config"] = {**output_config, "effort": effort_map.get(effort, effort)}
+        return data
+    effort = data.get("reasoning_effort")
+    if effort is None and isinstance(thinking, dict) and thinking.get("type") == "enabled":
+        effort = effort_from_budget(int(thinking.get("budget_tokens") or 0))
     if isinstance(effort, str):
         data["reasoning_effort"] = effort_map.get(effort, effort)
     return data
@@ -95,7 +119,7 @@ def load_maps() -> dict:
 class EffortMapper(CustomLogger):
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         try:
-            return rewrite(data, load_maps())
+            return rewrite(data, load_maps(), anthropic="anthropic" in str(call_type))
         except Exception:  # never fail a request because of this hook
             return data
 

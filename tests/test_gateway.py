@@ -95,6 +95,21 @@ class RenderTest(unittest.TestCase):
             out = gateway.render({"qwen3-32b": b})
         self.assertNotIn("chat_template_kwargs:", out)
 
+    def test_xhigh_support_declared_when_the_effort_map_produces_it(self):
+        # Without it LiteLLM's /v1/messages path rewrites xhigh to high.
+        with patch("mr.config.load") as load:
+            load.return_value.engine.max_model_len = 32768
+            load.return_value.chat_template_kwargs = {}
+            load.return_value.reasoning_effort_map = {"high": "xhigh"}
+            out = gateway.render({"qwen3-32b": None})
+        self.assertIn("supports_xhigh_reasoning_effort: true", out)
+        with patch("mr.config.load") as load:
+            load.return_value.engine.max_model_len = 32768
+            load.return_value.chat_template_kwargs = {}
+            load.return_value.reasoning_effort_map = {}
+            out = gateway.render({"qwen3-32b": None})
+        self.assertNotIn("supports_xhigh_reasoning_effort", out)
+
     def test_primary_role_wins_over_alphabetical_order(self):
         # "aaa-small" sorts first alphabetically; the old logic picked
         # models[0] as primary and matched "32b" in the name for small,
@@ -112,6 +127,7 @@ class RenderTest(unittest.TestCase):
             spec.engine = type("Engine", (), {"max_model_len": 32768})()
             spec.role = "small" if name == "aaa-small" else "primary"
             spec.chat_template_kwargs = {}
+            spec.reasoning_effort_map = {}
             return spec
 
         with patch("mr.config.load", side_effect=fake_load):
@@ -206,6 +222,42 @@ class EffortHookTest(unittest.TestCase):
 
     def test_disabled_thinking_adds_nothing(self):
         self.assertNotIn("reasoning_effort", self.rw(model="q", thinking={"type": "disabled"}))
+
+
+class AnthropicEffortHookTest(unittest.TestCase):
+    """/v1/messages: LiteLLM's adapter recomputes the effort from `thinking`
+    and ignores reasoning_effort, except for adaptive thinking, where it
+    reads output_config.effort. Live 2026-11-14: setting reasoning_effort
+    alone left budgets 6000/16000 failing."""
+
+    maps = {"q": QWEN_MAP}
+
+    def rw(self, **data):
+        return litellm_hooks.rewrite(dict(data), self.maps, anthropic=True)
+
+    def test_large_budget_becomes_adaptive_xhigh(self):
+        out = self.rw(model="q", thinking={"type": "enabled", "budget_tokens": 16000})
+        self.assertEqual(out["thinking"], {"type": "adaptive"})
+        self.assertEqual(out["output_config"], {"effort": "xhigh"})
+
+    def test_adaptive_high_is_mapped_and_other_keys_kept(self):
+        out = self.rw(model="q", thinking={"type": "adaptive"},
+                      output_config={"effort": "high", "format": {"type": "json"}})
+        self.assertEqual(out["output_config"], {"effort": "xhigh", "format": {"type": "json"}})
+
+    def test_adaptive_without_effort_gets_adapter_default(self):
+        self.assertEqual(self.rw(model="q", thinking={"type": "adaptive"})["output_config"], {"effort": "medium"})
+
+    def test_disabled_maps_none(self):
+        out = self.rw(model="q", thinking={"type": "disabled"})
+        self.assertEqual(out["output_config"], {"effort": "low"})
+
+    def test_summary_is_preserved(self):
+        out = self.rw(model="q", thinking={"type": "enabled", "budget_tokens": 5000, "summary": "auto"})
+        self.assertEqual(out["thinking"], {"type": "adaptive", "summary": "auto"})
+
+    def test_no_thinking_is_untouched(self):
+        self.assertEqual(self.rw(model="q", max_tokens=10), {"model": "q", "max_tokens": 10})
 
 
 class EffortMapsTest(unittest.TestCase):
