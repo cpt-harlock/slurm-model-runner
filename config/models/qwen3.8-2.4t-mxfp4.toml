@@ -102,6 +102,10 @@ measured_load_s = 5014
 
 [sites.leonardo.slurm]
 nodes = 8
+# boost_qos_lprod (4 d) hit MaxCpuPerAccount for 17 h on 2026-11-18; "normal" is
+# capped by the partition at 1 day.
+qos = "normal"
+time = "1-00:00:00"
 
 [sites.leonardo.engine]
 pipeline_parallel_size = 8
